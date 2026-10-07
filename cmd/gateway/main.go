@@ -45,7 +45,9 @@ func main() {
 
 	// TODO(M4): this server has NO timeouts, which is exactly the problem M4
 	// is about. Set ReadHeaderTimeout, ReadTimeout, WriteTimeout, IdleTimeout
-	// (from cfg.Server) and be ready to explain each one.
+	// (from cfg.Server) and be ready to explain each one. Also look at
+	// MaxHeaderBytes and (Go 1.27) MaxHeaderValueCount: what attack does each
+	// one bound, and what are the defaults if you leave them unset?
 	srv := &http.Server{
 		Addr:    ":8080",
 		Handler: handler,

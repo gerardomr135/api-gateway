@@ -13,6 +13,11 @@ import (
 //
 // Asserting on what the upstream saw is the whole point: a gateway is
 // defined by the request it forwards, not just the response it returns.
+//
+// M4 tip (Go 1.27): httptest.NewTestServer runs a server over an in-memory
+// fake network made for testing/synctest. With it, a test that says "upstream
+// takes 5s, route timeout is 1s, expect a 504" runs instantly and
+// deterministically instead of actually sleeping.
 func TestProxyForwardsHeaders(t *testing.T) {
 	t.Skip("TODO(M1): remove this Skip and implement")
 

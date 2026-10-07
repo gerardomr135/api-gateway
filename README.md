@@ -2,6 +2,8 @@
 
 A learning-by-doing API Gateway in Go, built stdlib-first, milestone by milestone.
 
+Requires **Go 1.27+** (`go version` to check).
+
 This repo is a **scaffold**: every package compiles, but the interesting parts are
 stubs marked with `TODO(Mx)`, where `Mx` is the milestone in the learning plan
 that teaches it. Find your next task with:

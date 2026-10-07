@@ -43,6 +43,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	//   3. errgroup.WithContext(r.Context()) (golang.org/x/sync/errgroup) for
 	//      users + products. Should a products failure cancel the users call?
 	//      If not, errgroup's cancel-on-first-error is the wrong tool. Think!
+	//      Stdlib alternative: sync.WaitGroup.Go (Go 1.25+) launches and
+	//      tracks a goroutine in one call; you collect the errors yourself.
 	//   4. Forward X-Request-ID and identity headers on every sub-request.
 	//   5. Encode OrderSummary; add a warning for each degraded part.
 	http.Error(w, "TODO(M9): aggregation", http.StatusNotImplemented)

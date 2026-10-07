@@ -43,8 +43,12 @@ type RetryPolicy struct {
 // Sleep with select on time.After and ctx.Done(), never a bare time.Sleep.
 func Retry(next http.RoundTripper, p RetryPolicy) http.RoundTripper {
 	return RoundTripperFunc(func(req *http.Request) (*http.Response, error) {
-		// TODO(M8). Gotcha: before retrying after a 5xx response, drain and
-		// close the previous resp.Body, or you leak the connection.
+		// TODO(M8). Gotcha: before retrying after a 5xx response, close the
+		// previous resp.Body, or you leak the connection. Since Go 1.27,
+		// Close() also drains a small unread HTTP/1 body for you so the
+		// connection can be reused; a large body still gets the connection
+		// closed. Find the limit in the net/http source and decide whether
+		// to rely on it.
 		return next.RoundTrip(req)
 	})
 }
