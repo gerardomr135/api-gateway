@@ -1,0 +1,52 @@
+# The lab (M0): one toysvc image, run as several services with different flags.
+# Use the flags to inject failure on demand, e.g. add "-latency=2s" or
+# "-fail-rate=0.5" to an instance, then `make lab-up` again.
+#
+# Ports are published to localhost so you can curl backends directly and
+# compare what they receive with and without the gateway in front.
+
+x-toysvc: &toysvc
+  build:
+    context: ..
+    dockerfile: Dockerfile
+    args:
+      TARGET: toysvc
+  restart: unless-stopped
+
+services:
+  users:
+    <<: *toysvc
+    command: ["-name=users", "-port=9001"]
+    ports: ["9001:9001"]
+
+  # Three instances of orders for load balancing (M7). They all listen on
+  # 9002 inside their own container; only orders-1 is published to the host.
+  orders-1:
+    <<: *toysvc
+    command: ["-name=orders-1", "-port=9002"]
+    ports: ["9002:9002"]
+  orders-2:
+    <<: *toysvc
+    command: ["-name=orders-2", "-port=9002"]
+  orders-3:
+    <<: *toysvc
+    command: ["-name=orders-3", "-port=9002"]
+
+  products:
+    <<: *toysvc
+    command: ["-name=products", "-port=9003"]
+    ports: ["9003:9003"]
+
+  # Uncomment once the gateway does something useful (M1/M2).
+  # gateway:
+  #   build:
+  #     context: ..
+  #     dockerfile: Dockerfile
+  #     args:
+  #       TARGET: gateway
+  #   command: ["-config=/configs/routes.yaml"]
+  #   volumes: ["../configs:/configs:ro"]
+  #   ports: ["8080:8080", "9090:9090"]
+  #   depends_on: [users, orders-1, orders-2, orders-3, products]
+
+  # (M10) Observability stack: add jaeger, prometheus and grafana here.

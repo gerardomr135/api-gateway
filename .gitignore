@@ -1,0 +1,19 @@
+# Build output
+/bin/
+*.exe
+*.test
+*.out
+
+# Profiles from M11 (keep them out of git; they can be large)
+*.pprof
+*.prof
+
+# Local secrets: JWT keys, .env files (M5)
+*.pem
+*.key
+.env
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store

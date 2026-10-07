@@ -1,0 +1,89 @@
+# routes.yaml: the gateway's route table.
+#
+# This file is the CONTRACT for internal/config. Fields are introduced
+# milestone by milestone; the ones marked (Mx) are ignored until you build them.
+# Your config.Load must VALIDATE this at startup and fail fast (M2).
+#
+# Hosts below use docker compose service names (resolved by Docker's DNS).
+# When running toysvc with `go run` on your machine, change them to localhost.
+
+server:
+  listen: ":8080"          # public listener
+  admin_listen: ":9090"    # (M10/M11) /metrics, /healthz, /readyz, /debug/pprof; never public
+  read_header_timeout: 5s  # (M4) Slowloris protection
+  idle_timeout: 60s        # (M4)
+
+upstreams:
+  users:
+    instances:
+      - http://users:9001
+    balancer: round_robin       # (M7) round_robin | least_conn
+    health_check:               # (M7)
+      path: /health
+      interval: 5s
+      unhealthy_after: 3
+      healthy_after: 2
+
+  orders:
+    instances:                  # (M7) three instances to balance across
+      - http://orders-1:9002
+      - http://orders-2:9002
+      - http://orders-3:9002
+    balancer: least_conn
+    health_check:
+      path: /health
+      interval: 5s
+      unhealthy_after: 3
+      healthy_after: 2
+    circuit_breaker:            # (M8)
+      failure_threshold: 5
+      open_for: 10s
+      half_open_max_requests: 1
+    max_concurrent: 100         # (M8) bulkhead size
+
+  products:
+    instances:
+      - http://products:9003
+
+routes:
+  # Order does NOT decide matching: the router must use longest-prefix match
+  # on path-segment boundaries (M2). Think about why order-dependent matching
+  # is a footgun in a config file.
+
+  - name: users
+    prefix: /api/users
+    strip_prefix: true          # /api/users/42 -> /42 at the upstream
+    methods: [GET, POST]
+    upstream: users
+    timeout: 2s                 # (M4)
+    auth: required              # (M5) required | optional | none
+    rate_limit:                 # (M6)
+      requests_per_second: 10
+      burst: 20
+
+  - name: orders
+    prefix: /api/orders
+    strip_prefix: true
+    methods: [GET, POST]
+    upstream: orders
+    timeout: 3s
+    auth: required
+    retry:                      # (M8) only idempotent methods are retried
+      max_attempts: 3
+      base_backoff: 50ms
+
+  - name: products
+    prefix: /api/products
+    strip_prefix: true
+    methods: [GET]
+    upstream: products
+    timeout: 1s
+    auth: none
+
+  # (M9) An aggregation route has no single upstream; it fans out.
+  # - name: order-summary
+  #   prefix: /api/order-summary
+  #   type: aggregate
+  #   methods: [GET]
+  #   timeout: 3s
+  #   auth: required
