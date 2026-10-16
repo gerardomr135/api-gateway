@@ -17,9 +17,11 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log/slog"
+	"math/rand/v2"
 	"net/http"
 	"os"
 	"time"
@@ -75,24 +77,60 @@ func main() {
 // healthHandler reports liveness for the gateway's active health checks (M7).
 func healthHandler(opts options) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		// TODO(M0): return 503 when opts.unhealthy is true, otherwise 200.
-		// Respond with a small JSON body and the right Content-Type.
-		http.Error(w, "TODO(M0): implement /health", http.StatusNotImplemented)
+		if opts.unhealthy {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(`{"status":"unhealthy"}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
 	}
 }
 
 // echoHandler returns a JSON description of the request it received.
 func echoHandler(opts options, logger *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		// TODO(M0): implement, in this order:
-		//   1. Sleep for opts.latency. Bonus: use a select on time.After and
-		//      r.Context().Done() so a cancelled request stops waiting. You'll
-		//      need this behavior to observe cancellation propagation in M4.
-		//   2. With probability opts.failRate, respond 500 (math/rand/v2).
-		//   3. Encode the echo payload with json.NewEncoder(w).Encode(...).
-		//      Include r.Header as-is: it's a map[string][]string.
-		//   4. Log one line: method, path, status, and X-Request-ID if present.
-		_ = logger
-		http.Error(w, "TODO(M0): implement echo", http.StatusNotImplemented)
+		status := http.StatusOK
+
+		defer func() {
+			logger.Info(
+				"request handled",
+				"method", r.Method,
+				"path", r.URL.Path,
+				"status", status,
+				"request_id", r.Header.Get("X-Request-ID"),
+			)
+		}()
+
+		// Use a timer instead of time.After so we can stop it if the request is cancelled.
+		// Explicit timers give you better control over timer resources.
+		timer := time.NewTimer(opts.latency)
+		defer timer.Stop()
+
+		// 1. Wait for the configured latency.
+		select {
+		case <-timer.C:
+			// continue
+
+		case <-r.Context().Done():
+			status = http.StatusRequestTimeout
+			http.Error(w, "request cancelled", status)
+			return
+		}
+
+		// 2. Fail randomly according to failRate.
+		if rand.Float64() < opts.failRate {
+			status = http.StatusInternalServerError
+			http.Error(w, "request failed", status)
+			return
+		}
+
+		// 3. Return the request headers as JSON.
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(r.Header)
+
+		// 4. Logging happens through defer.
 	}
 }

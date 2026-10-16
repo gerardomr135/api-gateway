@@ -36,6 +36,8 @@ func New(target *url.URL, transport http.RoundTripper, logger *slog.Logger) *htt
 			//   - decide about pr.Out.Host: keep client's Host or use target's?
 			// TODO(M3): copy the request ID onto pr.Out.Header.
 			// TODO(M5): strip inbound X-User-* headers, set them from verified claims.
+			pr.SetURL(target)
+			pr.SetXForwarded()
 		},
 
 		ErrorHandler: errorHandler(logger),

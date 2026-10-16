@@ -15,17 +15,21 @@
 package router
 
 import (
+	"cmp"
+	"errors"
+	"maps"
 	"net/http"
+	"slices"
+	"strings"
 
 	"github.com/yourname/api-gateway/internal/config"
 )
 
 // Router holds the compiled route table.
 type Router struct {
-	// TODO(M2): choose a data structure. A slice sorted by prefix length
-	// (longest first) is simple and fast enough for tens of routes.
 	// A radix tree is the "real" answer for thousands; don't start there.
-	routes []config.Route
+	routes   []config.Route
+	handlers map[string]http.Handler // keyed by route name
 }
 
 // Match is the result of a successful lookup.
@@ -36,10 +40,21 @@ type Match struct {
 }
 
 // New compiles the route table. It may assume cfg was already validated.
-func New(routes []config.Route) *Router {
-	// TODO(M2): copy and sort the routes; never keep a reference to a slice
-	// the caller might mutate later.
-	return &Router{routes: routes}
+func New(routes []config.Route, handlers map[string]http.Handler) (*Router, error) {
+	routes = slices.Clone(routes)
+	handlers = maps.Clone(handlers)
+
+	slices.SortFunc(routes, func(a, b config.Route) int {
+		return cmp.Compare(len(b.Prefix), len(a.Prefix))
+	})
+
+	for _, route := range routes {
+		if _, ok := handlers[route.Name]; !ok {
+			return nil, errors.New("router: missing handler for route " + route.Name)
+		}
+	}
+
+	return &Router{routes: routes, handlers: handlers}, nil
 }
 
 // Match finds the route for a request.
@@ -51,7 +66,26 @@ func New(routes []config.Route) *Router {
 //
 // Think about how the caller learns the allowed methods for the Allow header.
 func (rt *Router) Match(method, path string) (*Match, error) {
-	// TODO(M2)
+	for i := range rt.routes {
+		if path == rt.routes[i].Prefix || strings.HasPrefix(path, rt.routes[i].Prefix+"/") {
+			if !slices.Contains(rt.routes[i].Methods, method) {
+				return nil, &MethodNotAllowedError{Allowed: rt.routes[i].Methods}
+			}
+
+			upstreamPath := path
+			//Compute UpstreamPath. If StripPrefix is false, it's path unchanged. If it's true, it's strings.TrimPrefix(path, prefix), and an empty result becomes "/". The test expects /api/users → / and /api/users/42 → /42.
+			if rt.routes[i].StripPrefix {
+				upstreamPath = strings.TrimPrefix(path, rt.routes[i].Prefix)
+				if upstreamPath == "" {
+					upstreamPath = "/"
+				}
+			}
+
+			// If StripPrefix is false and path is longer than prefix, UpstreamPath is path unchanged.
+			return &Match{Route: &rt.routes[i], UpstreamPath: upstreamPath}, nil
+		}
+	}
+
 	return nil, ErrNotFound
 }
 
@@ -59,6 +93,25 @@ func (rt *Router) Match(method, path string) (*Match, error) {
 // to the route's proxy. You'll need a way to look up a handler per route,
 // e.g. a map[string]http.Handler keyed by route name, passed into New.
 func (rt *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	// TODO(M2)
-	http.Error(w, "router: not implemented", http.StatusNotImplemented)
+	match, err := rt.Match(r.Method, r.URL.Path)
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrNotFound):
+			http.Error(w, "router: not found", http.StatusNotFound)
+		case errors.Is(err, ErrMethodNotAllowed):
+			if e, ok := errors.AsType[*MethodNotAllowedError](err); ok {
+				w.Header().Set("Allow", strings.Join(e.Allowed, ", "))
+			}
+			http.Error(w, "router: method not allowed", http.StatusMethodNotAllowed)
+		default:
+			http.Error(w, "router: internal server error", http.StatusInternalServerError)
+		}
+		return
+	}
+
+	r2 := r.Clone(r.Context())
+	r2.URL.Path = match.UpstreamPath
+	r2.URL.RawPath = ""
+
+	rt.handlers[match.Route.Name].ServeHTTP(w, r2)
 }

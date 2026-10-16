@@ -18,7 +18,13 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net/http"
+	"net/url"
+	"os"
+	"strings"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 // Config is the root of routes.yaml.
@@ -88,20 +94,53 @@ type Retry struct {
 
 // Load reads the file at path, decodes it, applies defaults and validates it.
 func Load(path string) (*Config, error) {
-	// TODO(M2):
-	//   1. os.ReadFile(path)
-	//   2. decode into a Config
-	//   3. applyDefaults(&cfg)
-	//   4. if err := cfg.Validate(); err != nil { return nil, err }
-	// Wrap errors with context: fmt.Errorf("config %s: %w", path, err).
-	return nil, fmt.Errorf("config.Load(%q): %w", path, errors.ErrUnsupported)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("config.Load(%q): %w", path, err)
+	}
+
+	cfg := &Config{}
+
+	err = yaml.Unmarshal(data, cfg)
+	if err != nil {
+		return nil, fmt.Errorf("config.Load(%q): %w", path, err)
+	}
+
+	applyDefaults(cfg)
+
+	if err := cfg.Validate(); err != nil {
+		return nil, fmt.Errorf("config.Load(%q): %w", path, err)
+	}
+
+	return cfg, nil
 }
 
 // applyDefaults fills zero values with sensible defaults (e.g. Listen ":8080",
 // Auth "none", Timeout a few seconds). Decide: should defaults live here, or
 // should a missing timeout be a validation error? Write your reasoning in NOTES.md.
 func applyDefaults(cfg *Config) {
-	// TODO(M2)
+	if cfg.Server.Listen == "" {
+		cfg.Server.Listen = ":8080"
+	}
+	if cfg.Server.AdminListen == "" {
+		cfg.Server.AdminListen = ":9090"
+	}
+	if cfg.Server.ReadHeaderTimeout == 0 {
+		cfg.Server.ReadHeaderTimeout = 5 * time.Second
+	}
+	if cfg.Server.IdleTimeout == 0 {
+		cfg.Server.IdleTimeout = 30 * time.Second
+	}
+
+	for i := range cfg.Routes {
+		route := &cfg.Routes[i]
+		if route.Auth == "" {
+			route.Auth = "none"
+		}
+		if route.Timeout == 0 {
+			route.Timeout = 5 * time.Second
+		}
+	}
 }
 
 // Validate checks the whole config and reports ALL problems, not just the
@@ -113,6 +152,86 @@ func applyDefaults(cfg *Config) {
 //   - methods are valid HTTP methods
 //   - aggregate routes don't set an upstream; proxy routes must
 func (c *Config) Validate() error {
-	// TODO(M2)
+	errs := []error{}
+
+	upstreamNames := map[string]struct{}{}
+	for name, upstream := range c.Upstreams {
+		if len(upstream.Instances) == 0 {
+			errs = append(errs, fmt.Errorf("upstream %q has no instances", name))
+		}
+
+		for _, instance := range upstream.Instances {
+			instanceURL, err := url.Parse(instance)
+			if err != nil {
+				errs = append(errs, fmt.Errorf("upstream %q has invalid instance URL %q", name, instance))
+				continue
+			}
+
+			if instanceURL.Scheme != "http" && instanceURL.Scheme != "https" {
+				errs = append(errs, fmt.Errorf("upstream %q has instance URL %q with invalid scheme %q", name, instance, instanceURL.Scheme))
+			}
+
+			if instanceURL.Host == "" {
+				errs = append(errs, fmt.Errorf("upstream %q has instance URL %q with empty host", name, instance))
+			}
+		}
+		upstreamNames[name] = struct{}{}
+	}
+
+	routeNames := map[string]struct{}{}
+	prefixes := map[string]struct{}{}
+	for _, route := range c.Routes {
+		if _, ok := upstreamNames[route.Upstream]; !ok && route.Type != "aggregate" {
+			errs = append(errs, fmt.Errorf("route %q references unknown upstream %q", route.Name, route.Upstream))
+		}
+		if _, ok := prefixes[route.Prefix]; ok {
+			errs = append(errs, fmt.Errorf("duplicate prefix %q", route.Prefix))
+		} else {
+			prefixes[route.Prefix] = struct{}{}
+		}
+		switch {
+		case !strings.HasPrefix(route.Prefix, "/"):
+			errs = append(errs, fmt.Errorf("invalid prefix %q: must start with \"/\"", route.Prefix))
+		case strings.HasSuffix(route.Prefix, "/"):
+			// Also rejects "/": the router matches on prefix+"/" segment
+			// boundaries, so a trailing slash makes the route never match.
+			errs = append(errs, fmt.Errorf("invalid prefix %q: must not end with \"/\"", route.Prefix))
+		}
+		for _, method := range route.Methods {
+			if !isValidHTTPMethod(method) {
+				errs = append(errs, fmt.Errorf("route %q has invalid method %q", route.Name, method))
+			}
+		}
+		if _, ok := routeNames[route.Name]; ok {
+			errs = append(errs, fmt.Errorf("duplicate route name %q", route.Name))
+		} else {
+			routeNames[route.Name] = struct{}{}
+		}
+		if len(route.Methods) == 0 {
+			errs = append(errs, fmt.Errorf("route %q has no methods", route.Name))
+		}
+		//  Empty Upstream on a proxy route. Only the unknown-name check exists. Requiring an upstream for non-aggregate routes, and none for aggregate ones, is still not enforced.
+		if route.Type != "aggregate" && route.Upstream == "" {
+			errs = append(errs, fmt.Errorf("route %q is a proxy route but has no upstream", route.Name))
+		}
+		if route.Type == "aggregate" && route.Upstream != "" {
+			errs = append(errs, fmt.Errorf("route %q is an aggregate route but has an upstream", route.Name))
+		}
+	}
+
+	if len(errs) > 0 {
+		return errors.Join(errs...)
+	}
+
 	return nil
+}
+
+func isValidHTTPMethod(method string) bool {
+	switch method {
+	case http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut,
+		http.MethodPatch, http.MethodDelete, http.MethodConnect, http.MethodOptions, http.MethodTrace:
+		return true
+	default:
+		return false
+	}
 }

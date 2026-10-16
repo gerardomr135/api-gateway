@@ -17,31 +17,53 @@ import (
 	"flag"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
+
+	"github.com/yourname/api-gateway/internal/config"
+	"github.com/yourname/api-gateway/internal/proxy"
+	"github.com/yourname/api-gateway/internal/router"
 )
 
 func main() {
 	configPath := flag.String("config", "configs/routes.yaml", "path to the route table")
-	// TODO(M1): before you have a config file loader, a single -upstream flag
-	// (e.g. http://localhost:9001) is the fastest way to get M1 working.
-	upstream := flag.String("upstream", "http://localhost:9001", "single upstream URL (M1 only)")
 	flag.Parse()
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	slog.SetDefault(logger)
 
-	logger.Info("starting gateway", "config", *configPath, "upstream", *upstream)
+	logger.Info("starting gateway", "config", *configPath)
 
-	// TODO(M1): parse *upstream with url.Parse and build a proxy with
-	// proxy.New(...). Use it as the handler instead of notImplemented.
-	//
-	// TODO(M2): replace the single upstream with:
-	//   cfg, err := config.Load(*configPath)   // fail fast on error
-	//   rt := router.New(cfg.Routes, ...)
-	//
+	cfg, err := config.Load(*configPath) // fail fast on error
+	if err != nil {
+		logger.Error("failed to load config", "err", err)
+		os.Exit(1)
+	}
+
+	transport := proxy.NewTransport(proxy.TransportOptions{}) // one shared pool (M4 tunes it)
+	handlers := make(map[string]http.Handler, len(cfg.Routes))
+
+	for _, route := range cfg.Routes {
+		up := cfg.Upstreams[route.Upstream]
+
+		target, err := url.Parse(up.Instances[0]) // TODO(M7): pick a healthy instance, not just the first
+		if err != nil {
+			logger.Error("invalid upstream URL", "err", err)
+			os.Exit(1)
+		}
+
+		handlers[route.Name] = proxy.New(target, transport, logger)
+	}
+
+	rt, err := router.New(cfg.Routes, handlers)
+	if err != nil {
+		logger.Error("failed to create router", "err", err)
+		os.Exit(1)
+	}
+
 	// TODO(M3): wrap the handler: middleware.Chain(handler, Recovery, RequestID, AccessLog, ...)
 	//   Write down WHY you chose that order.
-	var handler http.Handler = http.HandlerFunc(notImplemented)
+	var handler http.Handler = rt
 
 	// TODO(M4): this server has NO timeouts, which is exactly the problem M4
 	// is about. Set ReadHeaderTimeout, ReadTimeout, WriteTimeout, IdleTimeout
@@ -49,7 +71,7 @@ func main() {
 	// MaxHeaderBytes and (Go 1.27) MaxHeaderValueCount: what attack does each
 	// one bound, and what are the defaults if you leave them unset?
 	srv := &http.Server{
-		Addr:    ":8080",
+		Addr:    cfg.Server.Listen,
 		Handler: handler,
 	}
 
@@ -61,10 +83,4 @@ func main() {
 		logger.Error("server stopped", "err", err)
 		os.Exit(1)
 	}
-}
-
-// notImplemented is a placeholder handler so the binary runs from day one.
-// Delete it once M1 works.
-func notImplemented(w http.ResponseWriter, r *http.Request) {
-	http.Error(w, "gateway: not implemented yet (start with M1)", http.StatusNotImplemented)
 }

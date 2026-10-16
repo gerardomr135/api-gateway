@@ -9,3 +9,11 @@ var (
 	ErrNotFound         = errors.New("router: no route matched")
 	ErrMethodNotAllowed = errors.New("router: method not allowed")
 )
+
+type MethodNotAllowedError struct{ Allowed []string }
+
+func (e *MethodNotAllowedError) Error() string {
+	return "router: method not allowed"
+}
+
+func (e *MethodNotAllowedError) Is(target error) bool { return target == ErrMethodNotAllowed }
