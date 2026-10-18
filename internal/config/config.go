@@ -18,6 +18,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -94,14 +95,21 @@ type Retry struct {
 
 // Load reads the file at path, decodes it, applies defaults and validates it.
 func Load(path string) (*Config, error) {
-	data, err := os.ReadFile(path)
+	data, err := os.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("config.Load(%q): %w", path, err)
 	}
+	defer data.Close()
 
 	cfg := &Config{}
 
-	err = yaml.Unmarshal(data, cfg)
+	yamlDecoder := yaml.NewDecoder(data)
+	yamlDecoder.KnownFields(true) // catch typos in configs/routes.yaml
+
+	err = yamlDecoder.Decode(cfg)
+	if errors.Is(err, io.EOF) { // Decode (unlike Unmarshal) errors on an empty file
+		err = errors.New("config is empty")
+	}
 	if err != nil {
 		return nil, fmt.Errorf("config.Load(%q): %w", path, err)
 	}

@@ -23,6 +23,7 @@ func TestGatewayEndToEnd(t *testing.T) {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("X-Upstream", name)
 			w.Header().Set("X-Seen-Path", r.URL.Path)
+			w.Header().Set("X-Seen-URI", r.RequestURI)
 			w.Header().Set("X-Seen-Query", r.URL.RawQuery)
 			w.Header().Set("X-Seen-Forwarded-For", r.Header.Get("X-Forwarded-For"))
 			io.WriteString(w, name)
@@ -72,6 +73,7 @@ func TestGatewayEndToEnd(t *testing.T) {
 		wantStatus         int
 		wantUpstream       string // "" when no upstream should be hit
 		wantSeenPath       string
+		wantSeenURI        string // raw request line path; "" = don't check
 		wantSeenQuery      string
 		wantAllow          string
 	}{
@@ -83,6 +85,11 @@ func TestGatewayEndToEnd(t *testing.T) {
 		{name: "not found", method: "GET", path: "/health", wantStatus: 404},
 		{name: "segment boundary is not a match", method: "GET", path: "/api/usersx", wantStatus: 404},
 		{name: "method not allowed", method: "DELETE", path: "/api/users/1", wantStatus: 405, wantAllow: "GET, POST"},
+		{name: "encoded slash survives strip", method: "GET", path: "/api/users/a%2Fb", wantStatus: 200, wantUpstream: "users", wantSeenPath: "/a/b", wantSeenURI: "/a%2Fb"},
+		{name: "encoded slash survives without strip", method: "GET", path: "/api/products/a%2Fb", wantStatus: 200, wantUpstream: "products", wantSeenPath: "/api/products/a/b", wantSeenURI: "/api/products/a%2Fb"},
+		{name: "dot-dot segment rejected", method: "GET", path: "/api/products/../users/1", wantStatus: 400},
+		{name: "encoded dot-dot rejected", method: "GET", path: "/api/products/%2e%2e/users/1", wantStatus: 400},
+		{name: "encoded prefix does not match", method: "GET", path: "/api/%75sers/1", wantStatus: 404},
 		{name: "upstream down", method: "GET", path: "/api/broken/1", wantStatus: 502},
 	}
 
@@ -115,6 +122,11 @@ func TestGatewayEndToEnd(t *testing.T) {
 			}
 			if got := resp.Header.Get("X-Seen-Query"); got != tt.wantSeenQuery {
 				t.Errorf("upstream saw query %q, want %q", got, tt.wantSeenQuery)
+			}
+			if tt.wantSeenURI != "" {
+				if got := resp.Header.Get("X-Seen-URI"); got != tt.wantSeenURI {
+					t.Errorf("upstream saw request URI %q, want %q", got, tt.wantSeenURI)
+				}
 			}
 			// SetXForwarded in proxy.New should tell the upstream who the client was.
 			if resp.Header.Get("X-Seen-Forwarded-For") == "" {

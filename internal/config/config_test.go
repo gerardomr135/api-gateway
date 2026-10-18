@@ -312,6 +312,41 @@ routes:
 	}
 }
 
+func TestLoadRejectsUnknownKeys(t *testing.T) {
+	path := writeConfig(t, `
+upstreams:
+  users:
+    instances: ["http://localhost:9001"]
+routes:
+  - name: users
+    prefix: /api/users
+    strip_prefx: true
+    upstream: users
+    methods: [GET]
+`)
+
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("Load() = nil, want error for unknown key")
+	}
+	if !strings.Contains(err.Error(), "strip_prefx") {
+		t.Fatalf("Load() error = %q, want it to name the unknown key", err)
+	}
+}
+
+func TestLoadRejectsEmptyFile(t *testing.T) {
+	if _, err := Load(writeConfig(t, "")); err == nil {
+		t.Fatal("Load() = nil, want error for empty config")
+	}
+}
+
+// The shipped sample must stay loadable under strict decoding.
+func TestLoadSampleConfig(t *testing.T) {
+	if _, err := Load("../../configs/routes.yaml"); err != nil {
+		t.Fatalf("Load(sample) error = %v", err)
+	}
+}
+
 func writeConfig(t *testing.T, content string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "routes.yaml")

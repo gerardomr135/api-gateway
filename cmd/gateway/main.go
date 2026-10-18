@@ -43,16 +43,18 @@ func main() {
 	transport := proxy.NewTransport(proxy.TransportOptions{}) // one shared pool (M4 tunes it)
 	handlers := make(map[string]http.Handler, len(cfg.Routes))
 
-	for _, route := range cfg.Routes {
-		up := cfg.Upstreams[route.Upstream]
-
-		target, err := url.Parse(up.Instances[0]) // TODO(M7): pick a healthy instance, not just the first
+	proxies := make(map[string]http.Handler, len(cfg.Upstreams))
+	for name, up := range cfg.Upstreams {
+		// Initialize each upstream proxy
+		upURL, err := url.Parse(up.Instances[0]) // TODO(M7): pick a healthy instance, not just the first
 		if err != nil {
 			logger.Error("invalid upstream URL", "err", err)
 			os.Exit(1)
 		}
-
-		handlers[route.Name] = proxy.New(target, transport, logger)
+		proxies[name] = proxy.New(upURL, transport, logger)
+	}
+	for _, route := range cfg.Routes {
+		handlers[route.Name] = proxies[route.Upstream] // Shared proxy for all routes to the same upstream (M7)
 	}
 
 	rt, err := router.New(cfg.Routes, handlers)

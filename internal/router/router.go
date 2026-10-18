@@ -6,6 +6,12 @@
 //	prefix /api/user   does NOT match /api/username   (not a segment boundary!)
 //	prefixes /api and /api/users both match /api/users/1 -> pick /api/users
 //
+// Paths are matched in their ESCAPED form (URL.EscapedPath), never decoded:
+// "%2F" is data, not a separator, and "/api/%75sers" must not sneak onto the
+// "/api/users" route. Anything that doesn't match literally fails closed (404).
+// Dot-segments ("." / "..") are rejected up front (400) because the gateway and
+// the upstream could otherwise resolve different paths.
+//
 // The router only decides "which route?". It does not proxy, authenticate or
 // rate limit. Keeping it a pure function of (method, path) makes it trivial
 // to unit-test and to benchmark (M11: `go test -bench . -benchmem`).
@@ -19,6 +25,7 @@ import (
 	"errors"
 	"maps"
 	"net/http"
+	"net/url"
 	"slices"
 	"strings"
 
@@ -57,7 +64,7 @@ func New(routes []config.Route, handlers map[string]http.Handler) (*Router, erro
 	return &Router{routes: routes, handlers: handlers}, nil
 }
 
-// Match finds the route for a request.
+// Match finds the route for a request. path must be the ESCAPED request path.
 //
 // Return values to design:
 //   - (match, nil)                     -> found
@@ -93,7 +100,12 @@ func (rt *Router) Match(method, path string) (*Match, error) {
 // to the route's proxy. You'll need a way to look up a handler per route,
 // e.g. a map[string]http.Handler keyed by route name, passed into New.
 func (rt *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	match, err := rt.Match(r.Method, r.URL.Path)
+	if hasDotSegment(r.URL.Path) {
+		http.Error(w, "router: bad request", http.StatusBadRequest)
+		return
+	}
+
+	match, err := rt.Match(r.Method, r.URL.EscapedPath())
 	if err != nil {
 		switch {
 		case errors.Is(err, ErrNotFound):
@@ -109,9 +121,28 @@ func (rt *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Path and RawPath must move together: Path is the decoded form we route
+	// on, RawPath keeps the client's encoding (e.g. %2F) for the upstream.
+	decoded, err := url.PathUnescape(match.UpstreamPath)
+	if err != nil {
+		http.Error(w, "router: bad request", http.StatusBadRequest)
+		return
+	}
+
 	r2 := r.Clone(r.Context())
-	r2.URL.Path = match.UpstreamPath
-	r2.URL.RawPath = ""
+	r2.URL.Path = decoded
+	r2.URL.RawPath = match.UpstreamPath
 
 	rt.handlers[match.Route.Name].ServeHTTP(w, r2)
+}
+
+// hasDotSegment reports whether a decoded path has a "." or ".." segment.
+// Checking the decoded form also catches "%2e%2e".
+func hasDotSegment(p string) bool {
+	for seg := range strings.SplitSeq(p, "/") {
+		if seg == "." || seg == ".." {
+			return true
+		}
+	}
+	return false
 }
