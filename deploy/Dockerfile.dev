@@ -1,0 +1,6 @@
+# Dev image for the gateway service: Go toolchain + air (live reload).
+# Used only by docker-compose.dev.yaml; the source is bind-mounted, not copied.
+FROM golang:1.27
+RUN go install github.com/air-verse/air@v1.67.4
+WORKDIR /src
+ENTRYPOINT ["air"]

@@ -1,0 +1,23 @@
+# Air: live reload for the gateway. Runs INSIDE the dev container
+# (deploy/docker-compose.dev.yaml), so it uses routes.yaml with Docker hostnames.
+# Run with `make dev`.
+root = "."
+tmp_dir = "tmp"
+
+[build]
+  cmd = "go build -buildvcs=false -o ./tmp/gateway ./cmd/gateway"
+  entrypoint = ["./tmp/gateway", "-config", "configs/routes.yaml"]
+  include_ext = ["go", "yaml"]
+  exclude_dir = ["tmp", "bin", "docs", "deploy", "cmd/toysvc"]
+  exclude_regex = ["_test\\.go$"]
+  delay = 300
+  # SIGINT first so the gateway's graceful shutdown (M11) gets to run.
+  send_interrupt = true
+  kill_delay = "2s"
+  stop_on_error = true
+
+[log]
+  time = false
+
+[misc]
+  clean_on_exit = true

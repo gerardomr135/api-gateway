@@ -4,8 +4,9 @@
 BIN     := bin
 CONFIG  := configs/routes.yaml
 COMPOSE := docker compose -f deploy/docker-compose.yaml
+DEV     := $(COMPOSE) -f deploy/docker-compose.dev.yaml
 
-.PHONY: help build test vet run toy lab-up lab-down lab-logs clean
+.PHONY: help build test vet run dev toy lab-up lab-down lab-logs clean
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-10s %s\n", $$1, $$2}'
@@ -22,6 +23,9 @@ vet: ## Static checks
 
 run: ## Run the gateway locally against the lab
 	go run ./cmd/gateway -config $(CONFIG)
+
+dev: ## Run the whole lab with the gateway live-reloading on save (Ctrl+C stops all)
+	$(DEV) up --build
 
 toy: ## Run one toy backend locally (override: make toy NAME=orders PORT=9002)
 	go run ./cmd/toysvc -name $(or $(NAME),users) -port $(or $(PORT),9001)

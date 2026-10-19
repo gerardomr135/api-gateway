@@ -37,16 +37,15 @@ services:
     command: ["-name=products", "-port=9003"]
     ports: ["9003:9003"]
 
-  # Uncomment once the gateway does something useful (M1/M2).
-  # gateway:
-  #   build:
-  #     context: ..
-  #     dockerfile: Dockerfile
-  #     args:
-  #       TARGET: gateway
-  #   command: ["-config=/configs/routes.yaml"]
-  #   volumes: ["../configs:/configs:ro"]
-  #   ports: ["8080:8080", "9090:9090"]
-  #   depends_on: [users, orders-1, orders-2, orders-3, products]
+  gateway:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      args:
+        TARGET: gateway
+    command: ["-config=/configs/routes.yaml"]
+    volumes: ["../configs:/configs:ro"]
+    ports: ["8080:8080", "9090:9090"]
+    depends_on: [users, orders-1, orders-2, orders-3, products]
 
   # (M10) Observability stack: add jaeger, prometheus and grafana here.

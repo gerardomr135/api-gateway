@@ -17,3 +17,6 @@
 .idea/
 .vscode/
 .DS_Store
+
+# Air live-reload build output
+/tmp/
