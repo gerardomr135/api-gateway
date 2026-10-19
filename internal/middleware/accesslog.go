@@ -1,7 +1,9 @@
 package middleware
 
 import (
+	"bufio"
 	"log/slog"
+	"net"
 	"net/http"
 	"time"
 )
@@ -74,6 +76,17 @@ func (r *statusRecorder) Write(b []byte) (int, error) {
 func (r *statusRecorder) Flush() {
 	r.wroteHeader = true
 	http.NewResponseController(r.ResponseWriter).Flush()
+}
+
+// Hijack delegates so a direct w.(http.Hijacker) assertion (WebSockets) still
+// works through the wrapper. A successful hijack is a 101 handoff, so record it.
+func (r *statusRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	conn, rw, err := http.NewResponseController(r.ResponseWriter).Hijack()
+	if err == nil && !r.wroteHeader {
+		r.status = http.StatusSwitchingProtocols
+		r.wroteHeader = true
+	}
+	return conn, rw, err
 }
 
 // Unwrap exposes the original writer to http.ResponseController (Go 1.20+).

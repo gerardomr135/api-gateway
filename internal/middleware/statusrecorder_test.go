@@ -104,3 +104,27 @@ func TestStatusRecorderFlushAndUnwrap(t *testing.T) {
 		t.Errorf("ResponseController.Flush: err=%v flushed=%v", err, under.Flushed)
 	}
 }
+
+// Hijack must reach the underlying connection through the wrapper.
+func TestStatusRecorderHijack(t *testing.T) {
+	done := make(chan bool, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		var h http.Hijacker = rec
+		conn, _, err := h.Hijack()
+		if err != nil {
+			t.Errorf("Hijack: %v", err)
+			done <- false
+			return
+		}
+		conn.Close()
+		done <- rec.status == http.StatusSwitchingProtocols
+	}))
+	defer srv.Close()
+	if resp, err := http.Get(srv.URL); err == nil {
+		resp.Body.Close()
+	}
+	if !<-done {
+		t.Error("hijack failed or status not recorded as 101")
+	}
+}

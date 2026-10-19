@@ -22,7 +22,7 @@ func Recovery(logger *slog.Logger) Middleware {
 					if v == http.ErrAbortHandler {
 						panic(v)
 					}
-					logger.Error("panic recovered", "error", v, "stack", string(debug.Stack()))
+					logger.Error("panic recovered", "error", v, "request_id", requestIDFor(w, r), "stack", string(debug.Stack()))
 					WriteError(w, r, http.StatusInternalServerError, CodeInternal)
 				}
 			}()

@@ -52,5 +52,16 @@ func WriteError(w http.ResponseWriter, r *http.Request, status int, code string)
 	if !ok {
 		msg = http.StatusText(status)
 	}
-	_ = json.NewEncoder(w).Encode(errorBody{Error: code, Message: msg, RequestID: RequestIDFrom(r.Context())})
+	_ = json.NewEncoder(w).Encode(errorBody{Error: code, Message: msg, RequestID: requestIDFor(w, r)})
+}
+
+// requestIDFor returns the request ID for r, falling back to the response
+// header. Recovery is the outermost middleware, so the request it holds
+// predates RequestID's context.WithValue and carries no ID; but RequestID
+// already set the header on w, which is the same writer Recovery sees.
+func requestIDFor(w http.ResponseWriter, r *http.Request) string {
+	if id := RequestIDFrom(r.Context()); id != "" {
+		return id
+	}
+	return w.Header().Get(HeaderRequestID)
 }

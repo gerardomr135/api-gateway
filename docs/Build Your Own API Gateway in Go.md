@@ -460,9 +460,9 @@ Update the status as you go; when a milestone hits **Built, needs review**, past
 | Milestone | Status | Key concept to explain out loud | Notes |
 | --- | --- | --- | --- |
 | M0 Toy backends and lab | In progress | Reverse vs forward proxy | Toysvc + compose done; NOTES entry pending |
-| M1 Single-route reverse proxy | In progress | Hop-by-hop headers, X-Forwarded-For | Needs JSON 502 + Host decision |
-| M2 Config-driven routing | Built, needs review | Longest-prefix match on segment boundaries | Tests + e2e pass; ready for review |
-| M3 Middleware chain | Not started | Onion model, ResponseWriter wrapping |  |
+| M1 Single-route reverse proxy | Done | Hop-by-hop headers, X-Forwarded-For | JSON 502 error handler in place |
+| M2 Config-driven routing | Done | Longest-prefix match on segment boundaries | Tests + e2e pass; NOTES entry written |
+| M3 Middleware chain | Done | Onion model, ResponseWriter wrapping | Tests, experiments and NOTES done |
 | M4 Timeouts and Transport | Not started | Context cancellation, connection pooling |  |
 | M5 Edge authentication | Not started | JWT + JWKS, header stripping |  |
 | M6 Rate limiting | Not started | Token bucket, distributed limits |  |

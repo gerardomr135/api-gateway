@@ -68,3 +68,26 @@ func TestRecoveryPassesThroughNormalResponse(t *testing.T) {
 		t.Errorf("status = %d, want 418", rec.Code)
 	}
 }
+
+// Recovery is outermost, so it must recover the request ID from the response
+// header that RequestID (inside it) already set.
+func TestRecoveryIncludesRequestID(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, nil))
+	boom := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { panic("boom") })
+	h := middleware.Chain(boom, middleware.Recovery(logger), middleware.RequestID())
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "/", nil))
+
+	id := rec.Header().Get(middleware.HeaderRequestID)
+	if id == "" {
+		t.Fatal("no X-Request-Id header on the 500")
+	}
+	if !strings.Contains(rec.Body.String(), `"request_id":"`+id+`"`) {
+		t.Errorf("body %q does not carry request_id %q", rec.Body.String(), id)
+	}
+	if !strings.Contains(buf.String(), `"request_id":"`+id+`"`) {
+		t.Errorf("panic log does not carry request_id %q: %s", id, buf.String())
+	}
+}
