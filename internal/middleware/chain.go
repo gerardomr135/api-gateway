@@ -12,7 +12,10 @@
 // It sees the request first and the response last.
 package middleware
 
-import "net/http"
+import (
+	"net/http"
+	"slices"
+)
 
 // Middleware decorates an http.Handler.
 type Middleware func(http.Handler) http.Handler
@@ -22,6 +25,8 @@ type Middleware func(http.Handler) http.Handler
 // Before implementing: on paper, work out which direction you must iterate
 // over mws to get mws[0] outermost. Then prove it with chain_test.go.
 func Chain(h http.Handler, mws ...Middleware) http.Handler {
-	// TODO(M3)
+	for _, mw := range slices.Backward(mws) {
+		h = mw(h)
+	}
 	return h
 }

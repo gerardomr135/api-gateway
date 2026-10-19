@@ -13,6 +13,8 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+
+	"github.com/yourname/api-gateway/internal/middleware"
 )
 
 // New returns a reverse proxy that forwards to target using transport.
@@ -30,20 +32,22 @@ func New(target *url.URL, transport http.RoundTripper, logger *slog.Logger) *htt
 		// hop-by-hop headers are removed, so a client could smuggle headers
 		// listed in "Connection: ..." past it.
 		Rewrite: func(pr *httputil.ProxyRequest) {
-			// TODO(M1):
-			//   - pr.SetURL(target)        sets scheme/host/path joining
-			//   - pr.SetXForwarded()       sets X-Forwarded-For/Host/Proto
-			//   - decide about pr.Out.Host: keep client's Host or use target's?
-			// TODO(M3): copy the request ID onto pr.Out.Header.
 			// TODO(M5): strip inbound X-User-* headers, set them from verified claims.
 			pr.SetURL(target)
 			pr.SetXForwarded()
+			// The context is the source of truth for the ID; don't rely on
+			// the inbound header copy surviving.
+			if id := middleware.RequestIDFrom(pr.In.Context()); id != "" {
+				pr.Out.Header.Set(middleware.HeaderRequestID, id)
+			}
 		},
 
 		ErrorHandler: errorHandler(logger),
-
-		// TODO(M3/M10): ModifyResponse is where you could add response headers
-		// (e.g. X-Request-ID) or record upstream status for metrics.
+		// The response X-Request-ID is set by the RequestID middleware, NOT in
+		// ModifyResponse: ReverseProxy copies upstream headers onto w with
+		// Add, so setting it in both places sends the header twice.
+		// TODO(M10): ModifyResponse is where you could record upstream status
+		// for metrics.
 	}
 }
 
@@ -51,13 +55,11 @@ func New(target *url.URL, transport http.RoundTripper, logger *slog.Logger) *htt
 // refused, timeout, ...). The default writes a bare 502 with no body.
 func errorHandler(logger *slog.Logger) func(http.ResponseWriter, *http.Request, error) {
 	return func(w http.ResponseWriter, r *http.Request, err error) {
-		// TODO(M1): log the error and respond 502 with a JSON body like
-		//   {"error":"bad_gateway","request_id":"..."}
 		// TODO(M4): distinguish with errors.Is:
 		//   context.DeadlineExceeded -> 504 Gateway Timeout
 		//   context.Canceled         -> client went away; log it, status barely matters
 		//   anything else            -> 502 Bad Gateway
-		logger.Error("upstream error", "err", err, "path", r.URL.Path)
-		http.Error(w, "bad gateway", http.StatusBadGateway)
+		logger.Error("upstream error", "err", err, "path", r.URL.Path, middleware.HeaderRequestID, middleware.RequestIDFrom(r.Context()))
+		middleware.WriteError(w, r, http.StatusBadGateway, middleware.CodeBadGateway)
 	}
 }

@@ -3,6 +3,8 @@ package middleware
 import (
 	"context"
 	"net/http"
+
+	"github.com/google/uuid"
 )
 
 // HeaderRequestID is the header used to propagate the request ID.
@@ -24,7 +26,23 @@ const requestIDKey ctxKey = iota
 func RequestID() Middleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// TODO(M3)
+			id := r.Header.Get(HeaderRequestID)
+
+			if id == "" {
+				id = generateRequestID()
+			}
+
+			if !isValidRequestID(id) {
+				id = generateRequestID()
+			}
+
+			// Set on the request so the proxy forwards it upstream, and on
+			// the response so the client can quote it when reporting a problem.
+			r.Header.Set(HeaderRequestID, id)
+			w.Header().Set(HeaderRequestID, id)
+
+			ctx := context.WithValue(r.Context(), requestIDKey, id)
+			r = r.WithContext(ctx)
 			next.ServeHTTP(w, r)
 		})
 	}
@@ -32,6 +50,17 @@ func RequestID() Middleware {
 
 // RequestIDFrom returns the request ID stored in ctx, or "" if none.
 func RequestIDFrom(ctx context.Context) string {
-	// TODO(M3): type-assert ctx.Value(requestIDKey) with the comma-ok form.
+	if id, ok := ctx.Value(requestIDKey).(string); ok {
+		return id
+	}
 	return ""
+}
+
+func generateRequestID() string {
+	return uuid.New().String()
+}
+
+func isValidRequestID(id string) bool {
+	_, err := uuid.Parse(id)
+	return err == nil
 }

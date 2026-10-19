@@ -3,6 +3,7 @@ package middleware
 import (
 	"log/slog"
 	"net/http"
+	"runtime/debug"
 )
 
 // Recovery converts a panic anywhere below it into a 500 and a logged stack
@@ -16,10 +17,15 @@ import (
 func Recovery(logger *slog.Logger) Middleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// TODO(M3): defer func() { if v := recover(); v != nil { ... } }()
-			// Use runtime/debug.Stack() for the trace.
-			// Question: if the handler already wrote headers before
-			// panicking, can you still send a 500?
+			defer func() {
+				if v := recover(); v != nil {
+					if v == http.ErrAbortHandler {
+						panic(v)
+					}
+					logger.Error("panic recovered", "error", v, "stack", string(debug.Stack()))
+					WriteError(w, r, http.StatusInternalServerError, CodeInternal)
+				}
+			}()
 			next.ServeHTTP(w, r)
 		})
 	}

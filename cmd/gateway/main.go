@@ -21,6 +21,7 @@ import (
 	"os"
 
 	"github.com/yourname/api-gateway/internal/config"
+	"github.com/yourname/api-gateway/internal/middleware"
 	"github.com/yourname/api-gateway/internal/proxy"
 	"github.com/yourname/api-gateway/internal/router"
 )
@@ -63,9 +64,18 @@ func main() {
 		os.Exit(1)
 	}
 
-	// TODO(M3): wrap the handler: middleware.Chain(handler, Recovery, RequestID, AccessLog, ...)
-	//   Write down WHY you chose that order.
-	var handler http.Handler = rt
+	// Order, outermost first:
+	//   Recovery   - outermost so it catches a panic from every layer below it.
+	//   RequestID  - before AccessLog so the log line can include the ID.
+	//   AccessLog  - wraps the router so it sees the final status and the
+	//                route name the router records.
+	// TODO(M5, M6): auth and rate limiting go inside AccessLog so rejected
+	// requests are still logged.
+	handler := middleware.Chain(rt,
+		middleware.Recovery(logger),
+		middleware.RequestID(),
+		middleware.AccessLog(logger),
+	)
 
 	// TODO(M4): this server has NO timeouts, which is exactly the problem M4
 	// is about. Set ReadHeaderTimeout, ReadTimeout, WriteTimeout, IdleTimeout

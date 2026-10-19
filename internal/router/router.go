@@ -30,6 +30,7 @@ import (
 	"strings"
 
 	"github.com/yourname/api-gateway/internal/config"
+	"github.com/yourname/api-gateway/internal/middleware"
 )
 
 // Router holds the compiled route table.
@@ -101,7 +102,7 @@ func (rt *Router) Match(method, path string) (*Match, error) {
 // e.g. a map[string]http.Handler keyed by route name, passed into New.
 func (rt *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if hasDotSegment(r.URL.Path) {
-		http.Error(w, "router: bad request", http.StatusBadRequest)
+		middleware.WriteError(w, r, http.StatusBadRequest, middleware.CodeBadRequest)
 		return
 	}
 
@@ -109,14 +110,14 @@ func (rt *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		switch {
 		case errors.Is(err, ErrNotFound):
-			http.Error(w, "router: not found", http.StatusNotFound)
+			middleware.WriteError(w, r, http.StatusNotFound, middleware.CodeNotFound)
 		case errors.Is(err, ErrMethodNotAllowed):
 			if e, ok := errors.AsType[*MethodNotAllowedError](err); ok {
 				w.Header().Set("Allow", strings.Join(e.Allowed, ", "))
 			}
-			http.Error(w, "router: method not allowed", http.StatusMethodNotAllowed)
+			middleware.WriteError(w, r, http.StatusMethodNotAllowed, middleware.CodeMethodNotAllowed)
 		default:
-			http.Error(w, "router: internal server error", http.StatusInternalServerError)
+			middleware.WriteError(w, r, http.StatusInternalServerError, middleware.CodeInternal)
 		}
 		return
 	}
@@ -125,9 +126,11 @@ func (rt *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// on, RawPath keeps the client's encoding (e.g. %2F) for the upstream.
 	decoded, err := url.PathUnescape(match.UpstreamPath)
 	if err != nil {
-		http.Error(w, "router: bad request", http.StatusBadRequest)
+		middleware.WriteError(w, r, http.StatusBadRequest, middleware.CodeBadRequest)
 		return
 	}
+
+	middleware.SetRouteName(r.Context(), match.Route.Name)
 
 	r2 := r.Clone(r.Context())
 	r2.URL.Path = decoded

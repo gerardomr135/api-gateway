@@ -12,6 +12,8 @@ package aggregate
 
 import (
 	"net/http"
+
+	"github.com/yourname/api-gateway/internal/middleware"
 )
 
 // OrderSummary is the composed response. A nil field encodes as JSON null,
@@ -47,5 +49,5 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	//      tracks a goroutine in one call; you collect the errors yourself.
 	//   4. Forward X-Request-ID and identity headers on every sub-request.
 	//   5. Encode OrderSummary; add a warning for each degraded part.
-	http.Error(w, "TODO(M9): aggregation", http.StatusNotImplemented)
+	middleware.WriteError(w, r, http.StatusNotImplemented, middleware.CodeNotImplemented) // TODO(M9)
 }
