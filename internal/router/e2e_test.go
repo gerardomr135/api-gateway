@@ -51,7 +51,7 @@ func TestGatewayEndToEnd(t *testing.T) {
 	}
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	transport := proxy.NewTransport(proxy.TransportOptions{})
+	transport := proxy.NewTransport(proxy.DefaultTransportOptions())
 	handlers := make(map[string]http.Handler, len(routes))
 	for _, r := range routes {
 		target, err := url.Parse(targets[r.Name])

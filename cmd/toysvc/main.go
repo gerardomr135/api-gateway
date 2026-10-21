@@ -65,9 +65,18 @@ func main() {
 	addr := fmt.Sprintf(":%d", opts.port)
 	logger.Info("toysvc listening", "addr", addr, "latency", opts.latency, "fail_rate", opts.failRate)
 
-	// TODO(M4): this is a backend, so zero-value timeouts are tolerable in the
-	// lab, but come back after M4 and ask yourself what a real service would set.
-	srv := &http.Server{Addr: addr, Handler: mux}
+	// A real service sets these too. ReadHeaderTimeout stops slow-header
+	// clients. IdleTimeout (60s) is deliberately LONGER than the gateway's
+	// Transport IdleConnTimeout (30s), so the gateway is always the side that
+	// closes an idle connection first. ReadTimeout and WriteTimeout stay unset
+	// here because -latency simulates slow handlers for the M4 experiments, and
+	// a WriteTimeout would cut those responses off.
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		logger.Error("server stopped", "err", err)
 		os.Exit(1)

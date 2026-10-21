@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestValidate is a table-driven test skeleton. Each case is a Config and
@@ -182,6 +183,54 @@ func TestValidate(t *testing.T) {
 					"users": {Instances: []string{"http://localhost:9001"}},
 				},
 				Routes: []Route{{Name: "users", Prefix: "/api/users", Upstream: "users", Methods: []string{"GET"}}},
+			},
+			wantErr: false,
+			wantMsg: "",
+		},
+		{
+			name: "write_timeout above route timeout",
+			cfg: Config{
+				Server: Server{WriteTimeout: 15 * time.Second},
+				Upstreams: map[string]Upstream{
+					"users": {Instances: []string{"http://localhost:9001"}},
+				},
+				Routes: []Route{{Name: "users", Prefix: "/api/users", Upstream: "users", Methods: []string{"GET"}, Timeout: 3 * time.Second}},
+			},
+			wantErr: false,
+			wantMsg: "",
+		},
+		{
+			name: "write_timeout below route timeout",
+			cfg: Config{
+				Server: Server{WriteTimeout: 2 * time.Second},
+				Upstreams: map[string]Upstream{
+					"users": {Instances: []string{"http://localhost:9001"}},
+				},
+				Routes: []Route{{Name: "users", Prefix: "/api/users", Upstream: "users", Methods: []string{"GET"}, Timeout: 3 * time.Second}},
+			},
+			wantErr: true,
+			wantMsg: "must exceed the largest route",
+		},
+		{
+			name: "write_timeout equal to route timeout",
+			cfg: Config{
+				Server: Server{WriteTimeout: 3 * time.Second},
+				Upstreams: map[string]Upstream{
+					"users": {Instances: []string{"http://localhost:9001"}},
+				},
+				Routes: []Route{{Name: "users", Prefix: "/api/users", Upstream: "users", Methods: []string{"GET"}, Timeout: 3 * time.Second}},
+			},
+			wantErr: true,
+			wantMsg: "must exceed the largest route",
+		},
+		{
+			name: "write_timeout zero means disabled",
+			cfg: Config{
+				Server: Server{WriteTimeout: 0},
+				Upstreams: map[string]Upstream{
+					"users": {Instances: []string{"http://localhost:9001"}},
+				},
+				Routes: []Route{{Name: "users", Prefix: "/api/users", Upstream: "users", Methods: []string{"GET"}, Timeout: 3 * time.Second}},
 			},
 			wantErr: false,
 			wantMsg: "",

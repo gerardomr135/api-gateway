@@ -37,10 +37,13 @@ type Config struct {
 
 // Server holds listener settings.
 type Server struct {
+	MaxHeaderBytes    int           `yaml:"max_header_bytes"` // M4
 	Listen            string        `yaml:"listen"`
 	AdminListen       string        `yaml:"admin_listen"`        // M10/M11
 	ReadHeaderTimeout time.Duration `yaml:"read_header_timeout"` // M4
 	IdleTimeout       time.Duration `yaml:"idle_timeout"`        // M4
+	WriteTimeout      time.Duration `yaml:"write_timeout"`       // M4
+	ReadTimeout       time.Duration `yaml:"read_timeout"`        // M4
 }
 
 // Upstream is a named group of interchangeable backend instances.
@@ -139,6 +142,15 @@ func applyDefaults(cfg *Config) {
 	if cfg.Server.IdleTimeout == 0 {
 		cfg.Server.IdleTimeout = 30 * time.Second
 	}
+	if cfg.Server.WriteTimeout == 0 {
+		cfg.Server.WriteTimeout = 15 * time.Second
+	}
+	if cfg.Server.ReadTimeout == 0 {
+		cfg.Server.ReadTimeout = 10 * time.Second
+	}
+	if cfg.Server.MaxHeaderBytes == 0 {
+		cfg.Server.MaxHeaderBytes = 1 << 20 // 1MB
+	}
 
 	for i := range cfg.Routes {
 		route := &cfg.Routes[i]
@@ -188,6 +200,10 @@ func (c *Config) Validate() error {
 
 	routeNames := map[string]struct{}{}
 	prefixes := map[string]struct{}{}
+	var largestRoute struct {
+		name    string
+		timeout time.Duration
+	}
 	for _, route := range c.Routes {
 		if _, ok := upstreamNames[route.Upstream]; !ok && route.Type != "aggregate" {
 			errs = append(errs, fmt.Errorf("route %q references unknown upstream %q", route.Name, route.Upstream))
@@ -225,6 +241,16 @@ func (c *Config) Validate() error {
 		if route.Type == "aggregate" && route.Upstream != "" {
 			errs = append(errs, fmt.Errorf("route %q is an aggregate route but has an upstream", route.Name))
 		}
+
+		if largestRoute.timeout < route.Timeout {
+			largestRoute.timeout = route.Timeout
+			largestRoute.name = route.Name
+		}
+	}
+
+	// Zero means "no write deadline", so there is no race to protect against.
+	if c.Server.WriteTimeout > 0 && c.Server.WriteTimeout <= largestRoute.timeout {
+		errs = append(errs, fmt.Errorf("write_timeout %s must exceed the largest route %s with timeout %s", c.Server.WriteTimeout, largestRoute.name, largestRoute.timeout))
 	}
 
 	if len(errs) > 0 {

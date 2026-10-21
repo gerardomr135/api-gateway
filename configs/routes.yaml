@@ -12,6 +12,10 @@ server:
   admin_listen: ":9090"    # (M10/M11) /metrics, /healthz, /readyz, /debug/pprof; never public
   read_header_timeout: 5s  # (M4) Slowloris protection
   idle_timeout: 60s        # (M4)
+  write_timeout: 15s        # (M4)
+  read_timeout: 10s         # (M4)
+  max_header_bytes: 1048576  # (M4) bytes (1 MiB); bounds request-header memory per connection
+
 
 upstreams:
   users:

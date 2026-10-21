@@ -15,6 +15,8 @@ const (
 	CodeInternal         = "internal_error"
 	CodeBadGateway       = "bad_gateway"
 	CodeNotImplemented   = "not_implemented"
+	CodeTimeout          = "timeout"
+	CodeRequestTimeout   = "request_timeout"
 )
 
 // messages are the human-readable explanations paired with each code. They
@@ -27,6 +29,8 @@ var messages = map[string]string{
 	CodeInternal:         "The gateway hit an unexpected error.",
 	CodeBadGateway:       "The upstream service could not be reached.",
 	CodeNotImplemented:   "This endpoint is not implemented yet.",
+	CodeTimeout:          "The upstream service took too long to respond.",
+	CodeRequestTimeout:   "The request took too long to send.",
 }
 
 type errorBody struct {

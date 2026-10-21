@@ -41,13 +41,15 @@ func main() {
 		os.Exit(1)
 	}
 
-	transport := proxy.NewTransport(proxy.TransportOptions{}) // one shared pool (M4 tunes it)
+	transport := proxy.NewTransport(proxy.DefaultTransportOptions()) // one shared, tuned pool
 	handlers := make(map[string]http.Handler, len(cfg.Routes))
 
+	// Shared proxy for all routes to the same upstream (M7)
 	proxies := make(map[string]http.Handler, len(cfg.Upstreams))
 	for name, up := range cfg.Upstreams {
 		// Initialize each upstream proxy
-		upURL, err := url.Parse(up.Instances[0]) // TODO(M7): pick a healthy instance, not just the first
+		// TODO(M7): pick a healthy instance, not just the first
+		upURL, err := url.Parse(up.Instances[0])
 		if err != nil {
 			logger.Error("invalid upstream URL", "err", err)
 			os.Exit(1)
@@ -55,7 +57,7 @@ func main() {
 		proxies[name] = proxy.New(upURL, transport, logger)
 	}
 	for _, route := range cfg.Routes {
-		handlers[route.Name] = proxies[route.Upstream] // Shared proxy for all routes to the same upstream (M7)
+		handlers[route.Name] = middleware.Timeout(route.Timeout)(proxies[route.Upstream])
 	}
 
 	rt, err := router.New(cfg.Routes, handlers)
@@ -76,15 +78,18 @@ func main() {
 		middleware.RequestID(),
 		middleware.AccessLog(logger),
 	)
-
-	// TODO(M4): this server has NO timeouts, which is exactly the problem M4
-	// is about. Set ReadHeaderTimeout, ReadTimeout, WriteTimeout, IdleTimeout
-	// (from cfg.Server) and be ready to explain each one. Also look at
-	// MaxHeaderBytes and (Go 1.27) MaxHeaderValueCount: what attack does each
-	// one bound, and what are the defaults if you leave them unset?
+	// MaxHeaderBytes bounds the memory one request's headers can use
+	// (default 1 MiB, from config). MaxHeaderValueCount, new in Go 1.27, bounds
+	// how many header values are parsed (default 500); left at its default.
+	// Both stop a client from making the server buffer or parse unbounded headers.
 	srv := &http.Server{
-		Addr:    cfg.Server.Listen,
-		Handler: handler,
+		Addr:              cfg.Server.Listen,
+		Handler:           handler,
+		ReadHeaderTimeout: cfg.Server.ReadHeaderTimeout,
+		ReadTimeout:       cfg.Server.ReadTimeout,
+		WriteTimeout:      cfg.Server.WriteTimeout,
+		IdleTimeout:       cfg.Server.IdleTimeout,
+		MaxHeaderBytes:    cfg.Server.MaxHeaderBytes,
 	}
 
 	// TODO(M11): run ListenAndServe in a goroutine, wait on
