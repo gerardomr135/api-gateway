@@ -443,6 +443,7 @@ Read the pattern sources before M1, then the rest just-in-time as each milestone
 | [`net/http/httputil` docs](https://pkg.go.dev/net/http/httputil) | `ReverseProxy`, `ProxyRequest`, `Rewrite` | M1 |
 | [RFC 9110 (HTTP Semantics)](https://www.rfc-editor.org/rfc/rfc9110) | Hop-by-hop headers, idempotent methods, 502/503/504 | M1, M8 |
 | [Cloudflare: Go net/http timeouts](https://blog.cloudflare.com/the-complete-guide-to-golang-net-http-timeouts/) | The clearest explanation of server and client timeouts | M4 |
+| [Go blog: Better HTTP/1 connection reuse](https://go.dev/blog/http-connection-reuse) (Go 1.27) | Why unread response bodies used to kill pooled connections, and what the Transport drains for you now (50 ms / 256 KB) | M4 |
 | [`golang.org/x/time/rate`](https://pkg.go.dev/golang.org/x/time/rate) | Reference token bucket to compare with yours | M6 |
 | [Envoy: load balancing and outlier detection](https://www.envoyproxy.io/docs/envoy/latest/intro/arch_overview/upstream/load_balancing/overview) | How a production proxy does M7 | M7 |
 | [AWS: Exponential Backoff and Jitter](https://aws.amazon.com/blogs/architecture/exponential-backoff-and-jitter/) | Why jitter matters, with simulations | M8 |
