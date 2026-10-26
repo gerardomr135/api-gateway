@@ -464,7 +464,7 @@ Update the status as you go; when a milestone hits **Built, needs review**, past
 | M1 Single-route reverse proxy | Done | Hop-by-hop headers, X-Forwarded-For | JSON 502 error handler in place |
 | M2 Config-driven routing | Done | Longest-prefix match on segment boundaries | Tests + e2e pass; NOTES entry written |
 | M3 Middleware chain | Done | Onion model, ResponseWriter wrapping | Tests, experiments and NOTES done |
-| M4 Timeouts and Transport | Not started | Context cancellation, connection pooling |  |
+| M4 Timeouts and Transport | Done | Context cancellation, connection pooling | Tests, break-it experiments and NOTES done |
 | M5 Edge authentication | Not started | JWT + JWKS, header stripping |  |
 | M6 Rate limiting | Not started | Token bucket, distributed limits |  |
 | M7 Load balancing + health | Not started | Active vs passive health checks |  |

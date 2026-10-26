@@ -405,7 +405,7 @@ capabilities like `Flush` and `Hijack`, so the spy must forward them (or expose
 
 ---
 
-## M4 — Timeouts, context and the Transport   (code finished 2026-10-20, break-it experiments still to run)
+## M4 — Timeouts, context and the Transport   (done 2026-10-26)
 
 What I built:
 - `config.Server` got `read_timeout`, `write_timeout` and `max_header_bytes`, with
@@ -434,9 +434,11 @@ What I built:
   slow-client upload (408) tests.
 
 What broke during the "break it" experiment, and why:
-- Experiments NOT run yet. Commands and expected results are in the side-case table
-  below (cases 1-10). Fill this in with what I actually saw. Bugs I hit while
-  building, found in review and by tests:
+- Ran the two experiments from the spec, scripted in `scripts/m4-experiments.sh`
+  and `scripts/m4-timewait.sh` (both restore the repo and the lab on exit).
+  Measured results are in "Break-it results" below. Side cases 1-6 and 8-10 in
+  the table further down are still PREDICTIONS; only case 7 was measured.
+  Bugs I hit while building, found in review and by tests:
   - `Timeout()` first version never called `next.ServeHTTP`, so every request
     returned an empty 200 and the route was never reached. No test existed.
   - The first design tried to hand the route's timeout to a middleware that runs
@@ -459,6 +461,115 @@ What broke during the "break it" experiment, and why:
     the CLIENT's connection, but it is a `net.Error` timeout, so `errorHandler`
     blamed the upstream (and would have fed a wrong failure into the circuit
     breaker in M8). Fixed: see "Fix for case 7" below.
+
+### Break-it results (measured 2026-10-26)
+
+**A. Slow upstream: why a timeout protects the whole gateway.** orders at
+`-latency=60s`, gateway limited to 256 file descriptors (tiny `ulimit -n`),
+50 requests/second for 30s at `/api/orders/1`, while probing the HEALTHY
+`/api/products/1` route. Script: `scripts/m4-experiments.sh` (vegeta, open loop).
+
+| | route timeout 1h (effectively none) | route timeout 1s |
+| --- | --- | --- |
+| Connections held to orders | 124, stayed there | 50 |
+| Healthy `products` route | `000` (no answer after 3s) | 200 in about 1 ms |
+| "too many open files" log lines | 25 | 0 |
+| Orders responses | none ever completed | 1500 of 1500 were 504, after about 1.00s |
+
+With no timeout, every request holds a client fd and an upstream fd until the
+upstream answers. 124 stuck requests used about 250 of the 256 descriptors, so the
+gateway could not accept or serve ANY route. With a 1s timeout, in-flight requests
+settle at rate x timeout = 50, about 100 descriptors, and the healthy route is
+untouched.
+
+What I got wrong first: my first run used `hey -c 300`, which is closed loop
+(always 300 requests in flight), so the 1s timeout still starved the gateway
+(about 1M "too many open files" lines, 998,767 responses of 502). A timeout caps
+how long a request lives, not how many a closed-loop client keeps in flight.
+Use a fixed-rate generator (vegeta) to model independent clients.
+
+**B. `MaxIdleConnsPerHost` 2 vs 100 vs 200.** 20000 requests, 200 concurrent
+clients, through the gateway to the fast products upstream. TIME_WAIT counted in the
+gateway's network namespace, towards port 9003, with a fresh gateway container
+(TIME_WAIT starts at 0) for every run. 5 runs per pool size. Scripts:
+`scripts/m4-timewait.sh` (one run of 2 vs 100) and `scripts/m4-timewait-matrix.sh`, which ran the
+5 x 3 matrix below.
+
+| MaxIdleConnsPerHost | Requests/sec (5 runs) | Mean req/s | TIME_WAIT after a run | p99 |
+| --- | --- | --- | --- | --- |
+| 2 (stdlib default) | 14.8k to 16.1k | **15.5k** | about 13,300 | 64 to 79 ms |
+| 100 (tuned) | 19.4k to 20.2k | **19.7k** | about 1,500 | 49 to 68 ms |
+| 200 (= concurrency) | 25.1k to 28.1k | **26.7k** | about 25 to 200 | 58 to 82 ms |
+
+Relative to the default: 100 is about +27% req/s with about 9x fewer TIME_WAIT
+sockets; 200 is about +72% with about 100x fewer. The pool-2 and pool-100 req/s
+ranges do not overlap, so the gap is real, not noise. p99 ranges overlap across
+all three, so I draw no conclusion about tail latency from this data.
+
+**What decides the result: does the request find an idle connection?**
+
+```mermaid
+flowchart TD
+    R["A request needs an upstream connection"] --> Q{"Idle pooled connection<br/>to this host available?"}
+    Q -->|"yes"| REUSE["REUSE it<br/>no TCP handshake"]
+    Q -->|"no"| DIAL["DIAL a new TCP connection<br/>(handshake cost)"]
+    REUSE --> DONE["Response finished"]
+    DIAL --> DONE
+    DONE --> P{"Room in the idle pool?<br/>idle < MaxIdleConnsPerHost"}
+    P -->|"yes"| KEEP["Keep it idle in the pool<br/>for the next request"]
+    P -->|"no"| CLOSE["CLOSE it<br/>gateway closes first"]
+    CLOSE --> TW["Socket sits in TIME_WAIT<br/>for 60s on the gateway"]
+    KEEP --> IDLE["Evicted after IdleConnTimeout 30s<br/>if nobody used it"]
+```
+
+**Same burst of clients, pool of 2 versus a pool big enough** (3 clients shown
+instead of 200; the pattern is the same):
+
+```mermaid
+sequenceDiagram
+    participant C as 3 concurrent clients
+    participant G as Gateway Transport pool
+    participant U as products upstream
+
+    rect rgb(255, 235, 235)
+    Note over C,U: MaxIdleConnsPerHost = 2
+    C->>G: req A, req B, req C at the same time
+    G->>U: A reuses idle conn 1
+    G->>U: B reuses idle conn 2
+    G->>U: C finds none idle: DIAL a new connection
+    U-->>G: three responses
+    Note over G: pool holds 2 idle. Conn C has no room, so it is CLOSED
+    G--xU: close conn C, TIME_WAIT for 60s
+    Note over G: repeat for every burst. With 200 clients about<br/>198 per round close = about 13,300 TIME_WAIT sockets
+    end
+
+    rect rgb(232, 245, 233)
+    Note over C,U: MaxIdleConnsPerHost >= 200 (peak concurrency)
+    C->>G: req A, req B, req C at the same time
+    G->>U: A, B, C each reuse an idle connection
+    U-->>G: three responses
+    Note over G: all three go back to the idle pool, nothing is closed
+    Note over G: next burst reuses them again.<br/>TIME_WAIT stays near 0, no handshakes
+    end
+```
+
+**Reading the numbers.**
+- The pool size decides how often a request pays for a TCP handshake. With 200
+  clients and a pool of 2, most requests dial a new connection and close it after,
+  and the closing side (the gateway) holds the socket in TIME_WAIT for 60s.
+  13,300 sockets for 20,000 requests means about two thirds of requests took that
+  path.
+- Throughput rises at every step (15.5k, 19.7k, 26.7k): the only change is
+  reusing connections instead of re-dialing.
+- At 100, half of the 200 clients still find no idle slot, which is the 1,500
+  TIME_WAIT left. Rule: set the pool at least to the expected peak concurrency per
+  upstream host.
+- This is a best case. The upstream is local and answers in about 1 ms, so the
+  handshake is cheap. Against a remote or TLS upstream each dial costs much more
+  and reuse matters more.
+- A bigger pool is not free: idle connections hold file descriptors on both sides
+  until `IdleConnTimeout` (30s) evicts them. Size it to realistic peak
+  concurrency, not infinity.
 
 Self-check answers:
   1. Why is an unbounded upstream call dangerous for the gateway's health, not
@@ -488,17 +599,16 @@ Interview one-liner:
   the gateway's idle timeout must be shorter than the upstream's.
 
 Open questions to bring to review:
-- Client cancel still answers 502, so AccessLog counts a client hang-up as an
-  upstream error. Use 499 for the log, or skip writing a response?
+- (Resolved) Client cancel now answers 499 `client_closed_request`, so AccessLog
+  no longer counts a hang-up as an upstream error.
 - Should a Transport timeout count as a failure for the circuit breaker (M8) the
   same way a context deadline does?
 - Case 7 is fixed (408), but a slow upload that eats the whole ROUTE timeout
   (route 1s, client uploading slowly) still ends in a 504, because nothing was
   recorded yet when the deadline fired. Can I tell "client still uploading" from
   "upstream slow to read the body"? Probably not without more state.
-- `ResponseHeaderTimeout` (10s) is longer than every route timeout, so it never
-  fires, but a route with `timeout: 30s` would be cut to 10s with no hint in the
-  config. Validate that every route timeout <= it, or set it to 0?
+- (Resolved) `server.response_header_timeout` is now a config field (default
+  10s) and `Validate` rejects any route whose timeout exceeds it.
 
 ### Component map: who talks to whom, and which clock watches each hop
 
