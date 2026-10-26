@@ -44,6 +44,10 @@ type Server struct {
 	IdleTimeout       time.Duration `yaml:"idle_timeout"`        // M4
 	WriteTimeout      time.Duration `yaml:"write_timeout"`       // M4
 	ReadTimeout       time.Duration `yaml:"read_timeout"`        // M4
+
+	// ResponseHeaderTimeout bounds how long the Transport waits for an
+	// upstream's response headers. Every route timeout must fit inside it.
+	ResponseHeaderTimeout time.Duration `yaml:"response_header_timeout"` // M4
 }
 
 // Upstream is a named group of interchangeable backend instances.
@@ -148,6 +152,9 @@ func applyDefaults(cfg *Config) {
 	if cfg.Server.ReadTimeout == 0 {
 		cfg.Server.ReadTimeout = 10 * time.Second
 	}
+	if cfg.Server.ResponseHeaderTimeout == 0 {
+		cfg.Server.ResponseHeaderTimeout = 10 * time.Second
+	}
 	if cfg.Server.MaxHeaderBytes == 0 {
 		cfg.Server.MaxHeaderBytes = 1 << 20 // 1MB
 	}
@@ -240,6 +247,12 @@ func (c *Config) Validate() error {
 		}
 		if route.Type == "aggregate" && route.Upstream != "" {
 			errs = append(errs, fmt.Errorf("route %q is an aggregate route but has an upstream", route.Name))
+		}
+
+		// Zero means "no limit", so a route can never exceed it. Otherwise the
+		// Transport would cut the route short with no hint in the config.
+		if c.Server.ResponseHeaderTimeout > 0 && route.Timeout > c.Server.ResponseHeaderTimeout {
+			errs = append(errs, fmt.Errorf("route %q timeout %s exceeds response_header_timeout %s", route.Name, route.Timeout, c.Server.ResponseHeaderTimeout))
 		}
 
 		if largestRoute.timeout < route.Timeout {

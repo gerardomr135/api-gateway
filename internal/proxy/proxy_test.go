@@ -159,7 +159,7 @@ func TestErrorHandlerMapsErrors(t *testing.T) {
 		{"deadline exceeded", context.DeadlineExceeded, http.StatusGatewayTimeout, middleware.CodeTimeout},
 		{"wrapped deadline exceeded", fmt.Errorf("round trip: %w", context.DeadlineExceeded), http.StatusGatewayTimeout, middleware.CodeTimeout},
 		{"transport timeout (net.Error)", timeoutErr{}, http.StatusGatewayTimeout, middleware.CodeTimeout},
-		{"client canceled", context.Canceled, http.StatusBadGateway, middleware.CodeBadGateway},
+		{"client canceled", context.Canceled, middleware.StatusClientClosedRequest, middleware.CodeClientClosed},
 		{"connection refused", errors.New("dial tcp: connection refused"), http.StatusBadGateway, middleware.CodeBadGateway},
 	}
 

@@ -224,6 +224,30 @@ func TestValidate(t *testing.T) {
 			wantMsg: "must exceed the largest route",
 		},
 		{
+			name: "route timeout above response_header_timeout",
+			cfg: Config{
+				Server: Server{ResponseHeaderTimeout: 10 * time.Second},
+				Upstreams: map[string]Upstream{
+					"users": {Instances: []string{"http://localhost:9001"}},
+				},
+				Routes: []Route{{Name: "users", Prefix: "/api/users", Upstream: "users", Methods: []string{"GET"}, Timeout: 30 * time.Second}},
+			},
+			wantErr: true,
+			wantMsg: "exceeds response_header_timeout",
+		},
+		{
+			name: "route timeout equal to response_header_timeout",
+			cfg: Config{
+				Server: Server{ResponseHeaderTimeout: 3 * time.Second},
+				Upstreams: map[string]Upstream{
+					"users": {Instances: []string{"http://localhost:9001"}},
+				},
+				Routes: []Route{{Name: "users", Prefix: "/api/users", Upstream: "users", Methods: []string{"GET"}, Timeout: 3 * time.Second}},
+			},
+			wantErr: false,
+			wantMsg: "",
+		},
+		{
 			name: "write_timeout zero means disabled",
 			cfg: Config{
 				Server: Server{WriteTimeout: 0},

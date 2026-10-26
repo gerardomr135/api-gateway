@@ -66,7 +66,7 @@ func errorHandler(logger *slog.Logger) func(http.ResponseWriter, *http.Request, 
 		// errors.Is, not ==: the Transport wraps context errors.
 		//   context.DeadlineExceeded -> 504 Gateway Timeout
 		//   net.Error with Timeout() -> 504 (dial / TLS / ResponseHeaderTimeout)
-		//   context.Canceled         -> client went away; logged, nobody reads the answer
+		//   context.Canceled         -> client went away; 499 so the access log is honest
 		//   anything else            -> 502 Bad Gateway
 		reqID := middleware.RequestIDFrom(r.Context())
 
@@ -97,7 +97,7 @@ func errorHandler(logger *slog.Logger) func(http.ResponseWriter, *http.Request, 
 			middleware.WriteError(w, r, http.StatusGatewayTimeout, middleware.CodeTimeout)
 		case errors.Is(err, context.Canceled):
 			logger.Warn("client canceled request", "path", r.URL.Path, middleware.HeaderRequestID, reqID)
-			middleware.WriteError(w, r, http.StatusBadGateway, middleware.CodeBadGateway)
+			middleware.WriteError(w, r, middleware.StatusClientClosedRequest, middleware.CodeClientClosed)
 		default:
 			// Dial and ResponseHeaderTimeout failures come from the Transport,
 			// not from our context, so they are net.Errors, not DeadlineExceeded.

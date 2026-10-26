@@ -5,6 +5,10 @@ import (
 	"net/http"
 )
 
+// StatusClientClosedRequest is nginx's non-standard 499: the client hung up
+// before the answer was ready. Nobody reads it; it exists for the access log.
+const StatusClientClosedRequest = 499
+
 // Error codes used in the JSON error body. They are part of the gateway's
 // public contract: clients can switch on them, unlike the human-readable
 // status text.
@@ -17,6 +21,7 @@ const (
 	CodeNotImplemented   = "not_implemented"
 	CodeTimeout          = "timeout"
 	CodeRequestTimeout   = "request_timeout"
+	CodeClientClosed     = "client_closed_request"
 )
 
 // messages are the human-readable explanations paired with each code. They

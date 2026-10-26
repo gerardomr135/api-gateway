@@ -41,7 +41,9 @@ func main() {
 		os.Exit(1)
 	}
 
-	transport := proxy.NewTransport(proxy.DefaultTransportOptions()) // one shared, tuned pool
+	transportOpts := proxy.DefaultTransportOptions()
+	transportOpts.ResponseHeaderTimeout = cfg.Server.ResponseHeaderTimeout
+	transport := proxy.NewTransport(transportOpts) // one shared, tuned pool
 	handlers := make(map[string]http.Handler, len(cfg.Routes))
 
 	// Shared proxy for all routes to the same upstream (M7)

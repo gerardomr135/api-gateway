@@ -14,6 +14,7 @@ server:
   idle_timeout: 60s        # (M4)
   write_timeout: 15s        # (M4)
   read_timeout: 10s         # (M4)
+  response_header_timeout: 10s  # (M4) upstream headers; must be >= every route timeout, < write_timeout
   max_header_bytes: 1048576  # (M4) bytes (1 MiB); bounds request-header memory per connection
 
 
