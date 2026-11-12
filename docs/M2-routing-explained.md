@@ -57,7 +57,7 @@ flowchart TD
 | **Longest prefix wins** | `/api` and `/api/users` both match `/api/users/1`. The more specific one wins |
 | **Strip prefix** | The gateway removes the prefix before forwarding: `/api/users/42` becomes `/42`, so the backend doesn't need to know the public URL layout |
 | **Fail fast** | If the config is broken, the program refuses to start with a clear error instead of failing on user requests |
-| **Defaults vs. validation** | A missing optional value gets a sensible default (`auth` becomes `none`). A value that can't be guessed (a route with no upstream) is an error |
+| **Defaults vs. validation** | A missing optional value gets a sensible default (`auth` becomes `required`, so an unannotated route is private). A value that can't be guessed (a route with no upstream) is an error |
 
 ### Segment boundary
 
@@ -460,7 +460,7 @@ Each list item is one `Route`:
 | `methods` | Allowed HTTP methods. Others get 405 with an `Allow` header | Yes |
 | `upstream` | Which entry in `upstreams:` to forward to. It must exist | Yes |
 | `timeout` | Max time for the request. Default 5s | No (M4) |
-| `auth` | `required`, `optional`, or `none`. Default `none` | No (M5) |
+| `auth` | `required`, `optional`, or `none`. Default `required` (fail closed) | No (M5) |
 | `rate_limit` | Token bucket settings | No (M6) |
 | `retry` | Retry policy | No (M8) |
 
@@ -499,7 +499,7 @@ request. That is a bug nobody could see by reading the router code.
 ### What `Load` and `Validate` do with this file
 
 1. Parse the YAML into the structs. A typo in the YAML syntax is an error here.
-2. Fill in missing defaults. Auth becomes `none`, timeout becomes `5s`, and so on.
+2. Fill in missing defaults. Auth becomes `required`, timeout becomes `5s`, and so on.
 3. `Validate` checks the cross-references (the upstream exists, URLs are valid,
    prefixes are unique, and so on), and the program refuses to start on any
    problem.

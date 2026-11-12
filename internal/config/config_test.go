@@ -182,7 +182,7 @@ func TestValidate(t *testing.T) {
 				Upstreams: map[string]Upstream{
 					"users": {Instances: []string{"http://localhost:9001"}},
 				},
-				Routes: []Route{{Name: "users", Prefix: "/api/users", Upstream: "users", Methods: []string{"GET"}}},
+				Routes: []Route{{Name: "users", Prefix: "/api/users", Upstream: "users", Methods: []string{"GET"}, Auth: "none"}},
 			},
 			wantErr: false,
 			wantMsg: "",
@@ -194,7 +194,7 @@ func TestValidate(t *testing.T) {
 				Upstreams: map[string]Upstream{
 					"users": {Instances: []string{"http://localhost:9001"}},
 				},
-				Routes: []Route{{Name: "users", Prefix: "/api/users", Upstream: "users", Methods: []string{"GET"}, Timeout: 3 * time.Second}},
+				Routes: []Route{{Name: "users", Prefix: "/api/users", Upstream: "users", Methods: []string{"GET"}, Auth: "none", Timeout: 3 * time.Second}},
 			},
 			wantErr: false,
 			wantMsg: "",
@@ -242,7 +242,7 @@ func TestValidate(t *testing.T) {
 				Upstreams: map[string]Upstream{
 					"users": {Instances: []string{"http://localhost:9001"}},
 				},
-				Routes: []Route{{Name: "users", Prefix: "/api/users", Upstream: "users", Methods: []string{"GET"}, Timeout: 3 * time.Second}},
+				Routes: []Route{{Name: "users", Prefix: "/api/users", Upstream: "users", Methods: []string{"GET"}, Auth: "none", Timeout: 3 * time.Second}},
 			},
 			wantErr: false,
 			wantMsg: "",
@@ -254,7 +254,7 @@ func TestValidate(t *testing.T) {
 				Upstreams: map[string]Upstream{
 					"users": {Instances: []string{"http://localhost:9001"}},
 				},
-				Routes: []Route{{Name: "users", Prefix: "/api/users", Upstream: "users", Methods: []string{"GET"}, Timeout: 3 * time.Second}},
+				Routes: []Route{{Name: "users", Prefix: "/api/users", Upstream: "users", Methods: []string{"GET"}, Auth: "none", Timeout: 3 * time.Second}},
 			},
 			wantErr: false,
 			wantMsg: "",
@@ -312,7 +312,13 @@ func TestValidate(t *testing.T) {
 
 func TestLoadDefaults(t *testing.T) {
 	t.Run("successful load defaults", func(t *testing.T) {
+		t.Setenv("TEST_SECRET", strings.Repeat("k", 32))
 		path := writeConfig(t, `
+auth:
+  algorithm: HS256
+  secret_env: TEST_SECRET
+  issuer: http://auth.local
+  audience: api-gateway
 upstreams:
   users:
     instances: ["http://localhost:9001"]
@@ -330,8 +336,8 @@ routes:
 		if cfg.Server.Listen != ":8080" {
 			t.Errorf("Listen = %q, want :8080", cfg.Server.Listen)
 		}
-		if cfg.Routes[0].Auth != "none" {
-			t.Errorf("Auth = %q, want none", cfg.Routes[0].Auth)
+		if cfg.Routes[0].Auth != "required" {
+			t.Errorf("Auth = %q, want required (fail closed)", cfg.Routes[0].Auth)
 		}
 	})
 	t.Run("failed load defaults", func(t *testing.T) {
@@ -415,6 +421,7 @@ func TestLoadRejectsEmptyFile(t *testing.T) {
 
 // The shipped sample must stay loadable under strict decoding.
 func TestLoadSampleConfig(t *testing.T) {
+	t.Setenv("GATEWAY_JWT_SECRET", strings.Repeat("s", 32))
 	if _, err := Load("../../configs/routes.yaml"); err != nil {
 		t.Fatalf("Load(sample) error = %v", err)
 	}
@@ -427,4 +434,137 @@ func writeConfig(t *testing.T, content string) string {
 		t.Fatal(err)
 	}
 	return path
+}
+
+// authCfg returns a valid config with one route using the given policy and a
+// valid HS256 auth section; tests mutate it to break one thing at a time.
+func authCfg(policy string) Config {
+	return Config{
+		Upstreams: map[string]Upstream{
+			"users": {Instances: []string{"http://localhost:9001"}},
+		},
+		Routes: []Route{{Name: "users", Prefix: "/api/users", Upstream: "users", Methods: []string{"GET"}, Auth: policy}},
+		Auth: &Auth{
+			Algorithm: "HS256",
+			SecretEnv: "TEST_SECRET",
+			Issuer:    "http://auth.local",
+			Audience:  "api-gateway",
+		},
+	}
+}
+
+func TestValidateAuth(t *testing.T) {
+	tests := []struct {
+		name    string
+		mutate  func(c *Config)
+		wantMsg []string // every substring must appear; empty means valid
+	}{
+		{"valid required", func(c *Config) {}, nil},
+		{"valid optional", func(c *Config) { c.Routes[0].Auth = "optional" }, nil},
+		{"no auth section when no route uses auth", func(c *Config) {
+			c.Auth = nil
+			c.Routes[0].Auth = "none"
+		}, nil},
+		{"typo in route policy", func(c *Config) { c.Routes[0].Auth = "requird" }, []string{`route "users"`, `"requird"`, "want required, optional or none"}},
+		{"empty route policy", func(c *Config) { c.Routes[0].Auth = "" }, []string{"invalid auth"}},
+		{"auth route without auth section", func(c *Config) { c.Auth = nil }, []string{`"users"`, `top-level "auth" section is missing`}},
+		{"unsupported algorithm", func(c *Config) { c.Auth.Algorithm = "RS256" }, []string{"auth.algorithm", `"RS256"`, "want HS256"}},
+		{"alg none", func(c *Config) { c.Auth.Algorithm = "none" }, []string{"auth.algorithm", `"none"`}},
+		{"empty algorithm", func(c *Config) { c.Auth.Algorithm = "" }, []string{"auth.algorithm"}},
+		{"missing secret_env", func(c *Config) { c.Auth.SecretEnv = "" }, []string{"auth.secret_env"}},
+		{"missing issuer", func(c *Config) { c.Auth.Issuer = "" }, []string{"auth.issuer"}},
+		{"missing audience", func(c *Config) { c.Auth.Audience = "" }, []string{"auth.audience"}},
+		{"negative leeway", func(c *Config) { c.Auth.Leeway = -time.Second }, []string{"auth.leeway", "-1s"}},
+		{"reports every auth problem at once", func(c *Config) {
+			c.Auth.Issuer = ""
+			c.Auth.Audience = ""
+			c.Auth.Leeway = -time.Second
+		}, []string{"auth.issuer", "auth.audience", "auth.leeway"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := authCfg("required")
+			tt.mutate(&cfg)
+
+			err := cfg.Validate()
+			if len(tt.wantMsg) == 0 {
+				if err != nil {
+					t.Fatalf("Validate() error = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("Validate() = nil, want error containing %q", tt.wantMsg)
+			}
+			for _, want := range tt.wantMsg {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("Validate() error = %q, want it to contain %q", err, want)
+				}
+			}
+		})
+	}
+}
+
+func TestLoadResolvesSecret(t *testing.T) {
+	const yamlText = `
+auth:
+  algorithm: HS256
+  secret_env: TEST_SECRET
+  issuer: http://auth.local
+  audience: api-gateway
+upstreams:
+  users:
+    instances: ["http://localhost:9001"]
+routes:
+  - name: users
+    prefix: /api/users
+    upstream: users
+    methods: [GET]
+    auth: required
+`
+
+	t.Run("reads the secret from the environment", func(t *testing.T) {
+		secret := strings.Repeat("k", 32)
+		t.Setenv("TEST_SECRET", secret)
+
+		cfg, err := Load(writeConfig(t, yamlText))
+		if err != nil {
+			t.Fatalf("Load() error = %v", err)
+		}
+		if string(cfg.Auth.Secret) != secret {
+			t.Errorf("Auth.Secret was not resolved from TEST_SECRET")
+		}
+	})
+
+	t.Run("unset variable", func(t *testing.T) {
+		t.Setenv("TEST_SECRET", "")
+
+		_, err := Load(writeConfig(t, yamlText))
+		if err == nil || !strings.Contains(err.Error(), `"TEST_SECRET" is not set`) {
+			t.Fatalf("Load() error = %v, want it to name the unset variable", err)
+		}
+	})
+
+	t.Run("short secret is rejected without leaking it", func(t *testing.T) {
+		secret := strings.Repeat("k", 31)
+		t.Setenv("TEST_SECRET", secret)
+
+		_, err := Load(writeConfig(t, yamlText))
+		if err == nil || !strings.Contains(err.Error(), "31 bytes") {
+			t.Fatalf("Load() error = %v, want it to report the 31-byte length", err)
+		}
+		if strings.Contains(err.Error(), secret) {
+			t.Errorf("error leaks the secret: %q", err)
+		}
+	})
+
+	t.Run("secret is never read from the YAML file", func(t *testing.T) {
+		t.Setenv("TEST_SECRET", strings.Repeat("k", 32))
+
+		_, err := Load(writeConfig(t, strings.Replace(yamlText, "audience: api-gateway", "audience: api-gateway\n  Secret: aaaa", 1)))
+		if err == nil {
+			t.Fatal("Load() accepted a secret written in the YAML file")
+		}
+	})
 }

@@ -33,6 +33,17 @@ type Config struct {
 	Server    Server              `yaml:"server"`
 	Upstreams map[string]Upstream `yaml:"upstreams"`
 	Routes    []Route             `yaml:"routes"`
+	Auth      *Auth               `yaml:"auth"`
+}
+
+type Auth struct {
+	Algorithm string        `yaml:"algorithm"`
+	SecretEnv string        `yaml:"secret_env"`
+	Issuer    string        `yaml:"issuer"`
+	Audience  string        `yaml:"audience"`
+	Leeway    time.Duration `yaml:"leeway"`
+
+	Secret []byte `yaml:"-"` // resolved from SecretEnv in Load, never from the file
 }
 
 // Server holds listener settings.
@@ -127,11 +138,41 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("config.Load(%q): %w", path, err)
 	}
 
+	// After Validate, so auth.secret_env is known to be non-empty.
+	if err := resolveSecrets(cfg); err != nil {
+		return nil, fmt.Errorf("config.Load(%q): %w", path, err)
+	}
+
 	return cfg, nil
 }
 
+// minHS256SecretBytes is the RFC 7518 §3.2 floor: an HS256 key must be at
+// least as long as the hash output (256 bits).
+const minHS256SecretBytes = 32
+
+// resolveSecrets reads the signing secret from the environment variable named
+// by auth.secret_env. The secret never lives in the YAML file (it would end up
+// in git), and it must never appear in an error message.
+func resolveSecrets(cfg *Config) error {
+	a := cfg.Auth
+	if a == nil || a.Algorithm != "HS256" {
+		return nil
+	}
+
+	secret := os.Getenv(a.SecretEnv)
+	switch {
+	case secret == "":
+		return fmt.Errorf("auth.secret_env: environment variable %q is not set or empty", a.SecretEnv)
+	case len(secret) < minHS256SecretBytes:
+		return fmt.Errorf("auth.secret_env: environment variable %q holds %d bytes, HS256 needs at least %d", a.SecretEnv, len(secret), minHS256SecretBytes)
+	}
+
+	a.Secret = []byte(secret)
+	return nil
+}
+
 // applyDefaults fills zero values with sensible defaults (e.g. Listen ":8080",
-// Auth "none", Timeout a few seconds). Decide: should defaults live here, or
+// Auth "required", Timeout a few seconds). Decide: should defaults live here, or
 // should a missing timeout be a validation error? Write your reasoning in NOTES.md.
 func applyDefaults(cfg *Config) {
 	if cfg.Server.Listen == "" {
@@ -161,8 +202,10 @@ func applyDefaults(cfg *Config) {
 
 	for i := range cfg.Routes {
 		route := &cfg.Routes[i]
+		// Fail closed: a route nobody annotated must not silently go public.
+		// Opening a route up takes an explicit "auth: none".
 		if route.Auth == "" {
-			route.Auth = "none"
+			route.Auth = "required"
 		}
 		if route.Timeout == 0 {
 			route.Timeout = 5 * time.Second
@@ -207,6 +250,7 @@ func (c *Config) Validate() error {
 
 	routeNames := map[string]struct{}{}
 	prefixes := map[string]struct{}{}
+	var authRoutes []string // routes that need the top-level auth section
 	var largestRoute struct {
 		name    string
 		timeout time.Duration
@@ -259,11 +303,45 @@ func (c *Config) Validate() error {
 			largestRoute.timeout = route.Timeout
 			largestRoute.name = route.Name
 		}
+
+		switch route.Auth {
+		case "required", "optional":
+			authRoutes = append(authRoutes, route.Name)
+		case "none":
+		default:
+			errs = append(errs, fmt.Errorf("route %q has invalid auth %q: want required, optional or none", route.Name, route.Auth))
+		}
 	}
 
 	// Zero means "no write deadline", so there is no race to protect against.
 	if c.Server.WriteTimeout > 0 && c.Server.WriteTimeout <= largestRoute.timeout {
 		errs = append(errs, fmt.Errorf("write_timeout %s must exceed the largest route %s with timeout %s", c.Server.WriteTimeout, largestRoute.name, largestRoute.timeout))
+	}
+
+	if len(authRoutes) > 0 && c.Auth == nil {
+		errs = append(errs, fmt.Errorf("routes %q use auth but the top-level \"auth\" section is missing: add it, or set those routes to auth: none (routes with no auth: line default to required)", authRoutes))
+	}
+
+	if a := c.Auth; a != nil {
+		// RS256 joins this list when the JWKS key source exists (M5 step 6);
+		// accepting it earlier would validate a config that cannot work.
+		switch a.Algorithm {
+		case "HS256":
+			if a.SecretEnv == "" {
+				errs = append(errs, errors.New("auth.secret_env is required for HS256: name the environment variable that holds the signing secret"))
+			}
+		default:
+			errs = append(errs, fmt.Errorf("auth.algorithm %q is not supported: want HS256", a.Algorithm))
+		}
+		if a.Issuer == "" {
+			errs = append(errs, errors.New("auth.issuer is required: without it the \"iss\" claim cannot be checked and tokens from any issuer would be accepted"))
+		}
+		if a.Audience == "" {
+			errs = append(errs, errors.New("auth.audience is required: without it the \"aud\" claim cannot be checked and tokens minted for other services would be accepted"))
+		}
+		if a.Leeway < 0 {
+			errs = append(errs, fmt.Errorf("auth.leeway is %s: must not be negative", a.Leeway))
+		}
 	}
 
 	if len(errs) > 0 {

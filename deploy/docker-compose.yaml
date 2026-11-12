@@ -44,6 +44,8 @@ services:
       args:
         TARGET: gateway
     command: ["-config=/configs/routes.yaml"]
+    environment:
+      GATEWAY_JWT_SECRET: ${GATEWAY_JWT_SECRET:?set GATEWAY_JWT_SECRET (>= 32 bytes)}
     volumes: ["../configs:/configs:ro"]
     ports: ["8080:8080", "9090:9090"]
     depends_on: [users, orders-1, orders-2, orders-3, products]

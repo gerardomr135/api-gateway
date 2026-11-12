@@ -18,6 +18,16 @@ server:
   max_header_bytes: 1048576  # (M4) bytes (1 MiB); bounds request-header memory per connection
 
 
+# (M5) How the gateway verifies Bearer tokens. Needed as soon as any route has
+# auth: required | optional. The signing secret is NOT in this file: it is read
+# from the environment variable named by secret_env (>= 32 bytes for HS256).
+auth:
+  algorithm: HS256          # pinned; any other "alg" in a token is rejected
+  secret_env: GATEWAY_JWT_SECRET
+  issuer: http://auth.local
+  audience: api-gateway
+  leeway: 30s               # clock-skew tolerance for exp/nbf
+
 upstreams:
   users:
     instances:
