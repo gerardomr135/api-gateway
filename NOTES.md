@@ -1021,3 +1021,145 @@ and `TestSlowClientUploadReturns408` (a raw TCP client against a real
 client needs 5s to upload), the deadline fires first and nothing was recorded, so
 the client still gets a 504. The other cause, an upstream that is slow to read the
 body, looks identical from here, so I did not guess.
+
+---
+
+## M5 — Authentication at the edge   (in progress, started 2026-10-26)
+
+Progress: step 1 (config) and step 2 (header stripping) done. Still to do: HS256
+verification, 401 responses, identity headers, RS256 + JWKS, break-it experiments.
+
+What I built so far (step 1, config):
+- A new top-level `auth:` section (`config.Auth`, a pointer on `Config` so "absent"
+  differs from "empty"): `algorithm`, `secret_env`, `issuer`, `audience`, `leeway`.
+  The route-level `auth: required | optional | none` stays a plain string on
+  `Route`. They are two different YAML keys at two levels, so they need two Go
+  fields. My first attempt turned `Route.Auth` into the struct, which broke every
+  comparison against a string.
+- The signing secret is NOT in the YAML. The file only holds the NAME of an env
+  var (`secret_env`); `resolveSecrets` reads it after `Validate` and stores it in
+  `Auth.Secret` (`yaml:"-"`, so it can never be decoded from the file even by
+  accident). Reason: the YAML is committed, so a secret in it lives in git history.
+- The secret must be at least 32 bytes (RFC 7518 §3.2: an HS256 key must be as
+  long as the hash output). A short key can be brute-forced offline from any
+  captured token. Errors name the variable and the length, never the value, and
+  a test checks that the error does not contain the secret.
+- `Validate` checks: route policy is one of the three values; routes using
+  `required`/`optional` need the top-level `auth` section (one error listing all
+  such routes); `algorithm` is on an allowlist (only `HS256` for now, RS256 joins
+  at the JWKS step, because accepting it earlier would validate a config that
+  can't work); `issuer`, `audience` and `secret_env` are non-empty; `leeway >= 0`.
+  All problems are reported at once (`errors.Join`, as in M2).
+- Config errors follow one shape: YAML path first (`auth.issuer`), what is wrong,
+  what is expected, and why it matters when that isn't obvious, with the bad value
+  shown via `%q` so `""` is visible.
+- Tests: `TestValidateAuth` (14 table cases, assertions on substrings so rewording
+  doesn't break them), `TestLoadResolvesSecret` (env read, unset var, 31-byte
+  secret without leaking it, secret in the YAML rejected). Env vars are set with
+  `t.Setenv`, which restores them; a stray `os.Setenv` in `Load` during
+  development would have leaked into the whole process.
+
+Decision: the default for a route with no `auth:` line is now `required`
+(it was `none`). Why: a forgotten annotation must fail closed. With `none` the
+mistake is an unauthenticated endpoint nobody notices; with `required` it is a 401
+somebody notices on the first request. Opening a route takes an explicit
+`auth: none`. Cost: a config with no `auth:` section must mark every route
+`auth: none` or it won't load, so quick throwaway configs are more verbose. The
+M2 doc described the old default; I updated it. Defaults live in `applyDefaults`,
+and security-relevant defaults fail closed.
+
+What I built (step 2, header stripping):
+- `middleware.StripIdentityHeaders()` (`internal/middleware/stripidentity.go`)
+  removes every `X-User-*` header the CLIENT sent, then calls next. It verifies
+  and rejects nothing; it only cleans.
+- Why: services trust `X-User-ID` because only the gateway is supposed to write it.
+  Headers are plain text, so a client can send `X-User-ID: admin` itself. On an
+  `auth: none` route like `products` no token is ever checked, so without the
+  strip the forged value would go straight to the upstream. Validating the JWT
+  cannot fix this, because the attack never presents a token.
+- Matching is by PREFIX on the name, ignoring case, with `_` treated as `-`:
+  - Prefix, not a list: a future `X-User-Email` is covered without anyone
+    remembering to update a list.
+  - Underscores: Go keeps `X_User_ID` as a different name from `X-User-ID`
+    (`CanonicalHeaderKey("X_User_ID")` is `X_user_id`), but CGI-style backends
+    (WSGI, PHP) map both to `HTTP_X_USER_ID`. A dash-only filter would let the
+    underscore form through to a Python upstream.
+  - It loops over `r.Header` directly and uses `delete(r.Header, key)` (not
+    `Header.Del`, which canonicalizes first) so it removes exactly the key it
+    matched. First version cloned the whole header map per request for no reason;
+    deleting while ranging over a map is safe in Go.
+- Wired in `cmd/gateway/main.go` as `Recovery -> RequestID -> StripIdentityHeaders
+  -> AccessLog -> router`. Why this spot:
+  - After Recovery, which must stay outermost to catch a panic from any layer.
+  - Before AccessLog: no layer below it and no log line can ever see a forged
+    identity. Matters as soon as the access log records the user ID, otherwise the
+    audit log would record the attacker's claim as fact.
+  - Before anything that SETS identity: Auth writes the real `X-User-*` later, and
+    stripping after it would erase the genuine ones.
+  - Global, not per route: it must run on `auth: none` routes and on 404s, with no
+    dependence on any route's policy or on auth config being right.
+  - Not in the proxy's `Rewrite`: that looks like a tidy safety net, but it would
+    also delete the real headers Auth sets.
+- Tests (`stripidentity_test.go`, table-driven plus three more):
+  - Removal rows: id, roles, an unlisted header, 3 values on one header, several at
+    once, underscore, mixed dash/underscore, empty value, bare `X-User-`.
+  - Survive rows: unrelated headers, `X-Users`, a name that merely CONTAINS
+    `x-user-` (`Foo-X-User-Id`), a value that mentions `X-User-Id`, bare `X-User`.
+    Without these, a version that does `clear(r.Header)` passes the whole table.
+  - A later layer can still set the real `X-User-ID` after the strip (the contract
+    Auth depends on); method/path/body are untouched; and a real HTTP connection
+    where the client writes `x-user-id`, `X_User_ID`, `X-USER-ROLES` on the wire,
+    which proves net/http canonicalizes names before the middleware sees them.
+  - The `called` flag is asserted AFTER ServeHTTP. My first test did its checks
+    inside `next`, so a middleware that never called next would have passed green.
+- Mistakes that taught me something:
+  - A map literal with two keys from `http.CanonicalHeaderKey("X-User-Id")`
+    compiles (the keys aren't constants), and the second silently overwrites the
+    first. My "multiple values" test row was really a single-value test.
+  - Break-it on the implementation: `clear(r.Header)`, no underscore normalization
+    and an `X-User-Id`-only filter were caught by the rows I expected. Switching
+    `HasPrefix` to `Contains` was NOT caught: my "prefix" row used `X-Auth-User-Id`,
+    which doesn't contain `x-user-` either. Fixed by using `Foo-X-User-Id`.
+    Lesson: a test row has to be able to tell the right code from the plausible
+    wrong code; mutate the implementation to check.
+- Decision pinned by a test: bare `X-User` (no trailing dash) is NOT stripped,
+  because the contract is `X-User-*`. Revisit if a service starts reading it.
+- Not done yet: an end-to-end test through the real router and proxy to a fake
+  upstream, and a manual curl against a running gateway.
+
+CORRECTION to my earlier plan: I wrote that the router puts the matched route in
+the context and Auth sits in the global chain inside AccessLog. That can't work.
+Global middleware runs BEFORE the router has matched anything, so Auth would have
+no route and no policy to read; `routeHolder` also only flows inward (AccessLog
+plants a slot, the router fills it), so only layers OUTSIDE the router can read
+what it wrote. The fix is a per-route wrapper, like `Timeout` already is in
+`main.go`:
+`handlers[route.Name] = Chain(proxy, Timeout(route.Timeout), Auth(keys, route.Auth))`.
+The policy is a plain argument. The router sets the route name for AccessLog
+before it calls the handler, so rejected requests are still logged with a route
+name, which answers the M3 open question below.
+
+Plan for the next steps:
+- Auth(keys, policy) wrapped per route (see the correction above).
+- Pin the algorithm in the key func (the `alg: none` and algorithm-confusion
+  attacks); `KeySource` takes the shape of the `jwt/v5` keyfunc.
+- Auth does not strip headers itself any more; StripIdentityHeaders already ran.
+  Update the comment on `Auth` in `auth.go` (its step 1 says "ALWAYS strip").
+
+What broke during the "break it" experiment, and why:
+  Hand-written `X-User-ID`: neutralized and covered by unit tests plus the
+  real-connection test; still to do against the full gateway.
+  (not run yet: wrong-key token, expired token)
+Self-check answers:
+  1. Why is stripping inbound identity headers as important as validating the JWT?
+     (not written yet)
+Interview one-liner:
+  (not written yet)
+Open questions to bring to review:
+- `auth: optional` with an INVALID token: reject with 401, or treat as anonymous?
+  A bad token usually means a client bug, so hiding it as anonymous makes it harder
+  to find. Decide before writing step 4.
+- Should upstream services also verify the token (zero-trust) or trust the
+  `X-User-*` headers? Know both arguments for the review.
+- `Validate` stays free of `os.Getenv`; only `Load` touches the environment. Is
+  splitting "validate the shape" from "resolve secrets" worth the extra function?
