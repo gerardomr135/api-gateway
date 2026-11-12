@@ -71,13 +71,19 @@ func main() {
 	// Order, outermost first:
 	//   Recovery   - outermost so it catches a panic from every layer below it.
 	//   RequestID  - before AccessLog so the log line can include the ID.
+	//   StripIdentityHeaders
+	//              - before AccessLog and everything after it, so no layer (or
+	//                log line) can ever see a client-forged X-User-*. It runs
+	//                for every request, whatever the route's auth policy.
 	//   AccessLog  - wraps the router so it sees the final status and the
 	//                route name the router records.
-	// TODO(M5, M6): auth and rate limiting go inside AccessLog so rejected
-	// requests are still logged.
+	// TODO(M5, M6): auth is wrapped around each route's handler above (the
+	// router has not matched anything yet at this point, so a global layer
+	// cannot know the route's policy); rate limiting is decided later.
 	handler := middleware.Chain(rt,
 		middleware.Recovery(logger),
 		middleware.RequestID(),
+		middleware.StripIdentityHeaders(),
 		middleware.AccessLog(logger),
 	)
 	// MaxHeaderBytes bounds the memory one request's headers can use
