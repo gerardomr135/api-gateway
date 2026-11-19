@@ -58,8 +58,24 @@ func main() {
 		}
 		proxies[name] = proxy.New(upURL, transport, logger)
 	}
+
+	var authCfg *middleware.AuthDependencies
+	if cfg.Auth != nil {
+		authCfg = &middleware.AuthDependencies{
+			Algorithm: cfg.Auth.Algorithm,
+			Issuer:    cfg.Auth.Issuer,
+			Audience:  cfg.Auth.Audience,
+			Leeway:    cfg.Auth.Leeway,
+			Keys:      middleware.StaticKey(cfg.Auth.Secret),
+		}
+	}
+
 	for _, route := range cfg.Routes {
-		handlers[route.Name] = middleware.Timeout(route.Timeout)(proxies[route.Upstream])
+		mws := []middleware.Middleware{middleware.Timeout(route.Timeout)}
+		if route.Auth != "none" {
+			mws = append(mws, middleware.Auth(*authCfg, route.Auth))
+		}
+		handlers[route.Name] = middleware.Chain(proxies[route.Upstream], mws...)
 	}
 
 	rt, err := router.New(cfg.Routes, handlers)

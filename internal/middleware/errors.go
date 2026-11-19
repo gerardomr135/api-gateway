@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 )
 
@@ -22,6 +23,7 @@ const (
 	CodeTimeout          = "timeout"
 	CodeRequestTimeout   = "request_timeout"
 	CodeClientClosed     = "client_closed_request"
+	CodeUnauthorized     = "unauthorized"
 )
 
 // messages are the human-readable explanations paired with each code. They
@@ -36,6 +38,7 @@ var messages = map[string]string{
 	CodeNotImplemented:   "This endpoint is not implemented yet.",
 	CodeTimeout:          "The upstream service took too long to respond.",
 	CodeRequestTimeout:   "The request took too long to send.",
+	CodeUnauthorized:     "The request is missing a valid authentication token.",
 }
 
 type errorBody struct {
@@ -73,4 +76,27 @@ func requestIDFor(w http.ResponseWriter, r *http.Request) string {
 		return id
 	}
 	return w.Header().Get(HeaderRequestID)
+}
+
+// unauthorizedError answers 401 with an RFC 6750 challenge. Descriptions are
+// fixed strings (never client input), so no escaping is needed.
+func unauthorizedError(w http.ResponseWriter, r *http.Request, bearerErr, desc string) {
+	WriteErrorWithHeaders(w, r, http.StatusUnauthorized, CodeUnauthorized, map[string]string{
+		"WWW-Authenticate": fmt.Sprintf(`Bearer error=%q, error_description=%q`, bearerErr, desc),
+	})
+}
+
+func WriteErrorWithHeaders(w http.ResponseWriter, r *http.Request, status int, code string, headers map[string]string) {
+	h := w.Header()
+	h.Set("Content-Type", "application/json")
+	h.Set("X-Content-Type-Options", "nosniff")
+	for k, v := range headers {
+		h.Set(k, v)
+	}
+	w.WriteHeader(status)
+	msg, ok := messages[code]
+	if !ok {
+		msg = http.StatusText(status)
+	}
+	_ = json.NewEncoder(w).Encode(errorBody{Error: code, Message: msg, RequestID: requestIDFor(w, r)})
 }
