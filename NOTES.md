@@ -1026,8 +1026,9 @@ body, looks identical from here, so I did not guess.
 
 ## M5 — Authentication at the edge   (in progress, started 2026-10-26)
 
-Progress: step 1 (config) and step 2 (header stripping) done. Still to do: HS256
-verification, 401 responses, identity headers, RS256 + JWKS, break-it experiments.
+Progress: steps 1 (config), 2 (header stripping) and 3 (HS256 verification, 401s,
+identity headers, per-route policy) done, with unit and end-to-end tests. Still to
+do: RS256 + JWKS, a manual curl against a running gateway.
 
 What I built so far (step 1, config):
 - A new top-level `auth:` section (`config.Auth`, a pointer on `Config` so "absent"
@@ -1124,8 +1125,7 @@ What I built (step 2, header stripping):
     wrong code; mutate the implementation to check.
 - Decision pinned by a test: bare `X-User` (no trailing dash) is NOT stripped,
   because the contract is `X-User-*`. Revisit if a service starts reading it.
-- Not done yet: an end-to-end test through the real router and proxy to a fake
-  upstream, and a manual curl against a running gateway.
+- The end-to-end test through the real router and proxy is now done (step 3).
 
 CORRECTION to my earlier plan: I wrote that the router puts the matched route in
 the context and Auth sits in the global chain inside AccessLog. That can't work.
@@ -1139,27 +1139,106 @@ The policy is a plain argument. The router sets the route name for AccessLog
 before it calls the handler, so rejected requests are still logged with a route
 name, which answers the M3 open question below.
 
-Plan for the next steps:
-- Auth(keys, policy) wrapped per route (see the correction above).
-- Pin the algorithm in the key func (the `alg: none` and algorithm-confusion
-  attacks); `KeySource` takes the shape of the `jwt/v5` keyfunc.
-- Auth does not strip headers itself any more; StripIdentityHeaders already ran.
-  Update the comment on `Auth` in `auth.go` (its step 1 says "ALWAYS strip").
+What I built (step 3, Auth middleware):
+- `Auth(deps AuthDependencies, policy string)` wrapped PER ROUTE in `main.go`:
+  `Chain(proxy, Timeout(route.Timeout), Auth(deps, route.Auth))`. The policy is a
+  plain argument because global middleware runs before the router has matched
+  anything (see the CORRECTION above). `auth: none` routes skip it entirely.
+- Policies:
+  - `required`: valid token or 401.
+  - `optional`: no `Authorization` header means anonymous (passes through with no
+    identity headers); a header that IS present must be valid, otherwise 401.
+  - `none`: untouched. StripIdentityHeaders already cleaned the request.
+- Verification uses a `jwt.Parser` built once, outside the per-request path, with:
+  `WithValidMethods([]string{alg})` (pins the algorithm from config, so `alg:
+  none` and HS/RS confusion fail), `WithIssuer`, `WithAudience`, `WithLeeway` and
+  `WithExpirationRequired` (a token with no `exp` is rejected, not immortal).
+- `KeySource` has one method, `Key(*jwt.Token) (any, error)`, the shape of the
+  `jwt/v5` keyfunc, so `a.Keys.Key` plugs straight into `ParseWithClaims`.
+  `StaticKey` is a named `[]byte` that returns the secret; a JWKS cache keyed by
+  `kid` will implement the same interface.
+- On success: `X-User-ID` from `sub` (empty subject is rejected) and
+  `X-User-Roles` from the `roles` claim joined with commas, set with the
+  `HeaderUserID` / `HeaderUserRoles` constants.
+- On failure: 401 with the JSON error body and a `WWW-Authenticate` challenge
+  (RFC 6750): bare `Bearer` when there are no credentials, `error="invalid_request"`
+  for a malformed header, `error="invalid_token"` for a bad token. The description
+  strings are fixed, never client input, so the header can't be injected into.
+- The scheme match is a case-insensitive PREFIX check (RFC 7235). The first draft
+  used `strings.Cut(header, "Bearer ")`, which also matches `X Bearer <token>`.
+- Tests: `auth_test.go` (12-row table over the three policies) and
+  `internal/router/auth_e2e_test.go`, which builds the same chain as `main.go`
+  in front of a fake upstream that echoes the identity headers it saw and counts
+  hits (10 cases, including "no upstream hit on 401").
+
+Bugs I wrote in the first draft and found on review:
+- Policy branching: `authHeader != "" && policy == "required"` returned 401 (the
+  `!=`/`==` was inverted), and `optional` with a header skipped verification
+  completely, so any garbage token got through as if valid.
+- `ParseWithClaims(token, claims, ...)` took the claims by value, so nothing could
+  be decoded into it. Needs `&claims`.
+- `Issuer` and `Audience` were read from config and never enforced.
+- Malformed `WWW-Authenticate` (stray `}`), and `invalid_request` where a bad
+  token needs `invalid_token`.
+- Typo `AuthDepenencies` (renamed everywhere).
+Lesson: the policy matrix needs a test row for each (policy x header present /
+valid / invalid) cell. Writing the table made the inverted condition obvious.
+
+Decision: `optional` + INVALID token returns 401, not anonymous. A bad token is
+almost always a client bug (expired, wrong key, wrong audience); silently
+downgrading to anonymous hides it, and the user sees "logged out" behaviour
+with no error to debug. Cost: a client with a stale token loses access to the
+public part of an optional route until it drops the header. Accepted.
 
 What broke during the "break it" experiment, and why:
-  Hand-written `X-User-ID`: neutralized and covered by unit tests plus the
-  real-connection test; still to do against the full gateway.
-  (not run yet: wrong-key token, expired token)
+  Measured through the real chain (router + proxy + fake upstream) in
+  `TestGatewayAuthEndToEnd`:
+  - Hand-written `X-User-ID: mallory` / `X-User-Roles: superuser`:
+    - `required`, no token: 401, upstream never hit.
+    - `required`, valid token: the forged values are gone; upstream sees `alice`
+      and `admin,dev` from the token.
+    - `optional` anonymous and `none`: upstream sees NO identity headers.
+  - Wrong-key token (signed with another secret): 401.
+  - Expired token: 401.
+  - Wrong audience: 401.
+  - `optional` with a garbage token: 401.
+  Unit level also covers HS512 (pinned algorithm rejects it) and a non-Bearer
+  scheme.
+  NOT run yet: a manual curl against a real gateway process (reads `secret_env`
+  through `config.Load`, which the test bypasses), an `alg: none` token, and a
+  token with no `exp`.
 Self-check answers:
   1. Why is stripping inbound identity headers as important as validating the JWT?
-     (not written yet)
+     (DRAFT, rewrite in my own words) Upstreams trust `X-User-*` because they
+     assume only the gateway writes them. Validating the JWT only protects
+     requests that present a token; an attacker who skips the token and just sends
+     `X-User-ID: admin` never reaches the validator, so on `none`/`optional`
+     routes the forged header would go straight through. Stripping makes the
+     gateway the only possible author of those headers; without it the JWT check
+     protects nothing the upstream actually relies on.
+  2. Why is the algorithm pinned from config instead of read from the token?
+     (DRAFT) The token header is attacker-controlled. If the verifier believes it,
+     `alg: none` skips the signature, and switching RS256 to HS256 makes the
+     verifier use the public key as an HMAC secret. Config decides, the token
+     only has to match.
 Interview one-liner:
-  (not written yet)
+  (DRAFT) "The gateway is the only trusted writer of identity headers: it strips
+  whatever the client sends, verifies the JWT with a pinned algorithm plus
+  issuer, audience and expiry, then sets X-User-ID itself, so upstreams can trust
+  those headers without re-verifying anything."
 Open questions to bring to review:
-- `auth: optional` with an INVALID token: reject with 401, or treat as anonymous?
-  A bad token usually means a client bug, so hiding it as anonymous makes it harder
-  to find. Decide before writing step 4.
 - Should upstream services also verify the token (zero-trust) or trust the
-  `X-User-*` headers? Know both arguments for the review.
+  `X-User-*` headers? Know both arguments for the review. (Trust: simpler,
+  one place for keys and rotation. Verify: a bypassed gateway or a mis-routed
+  internal call is no longer a full identity takeover.)
 - `Validate` stays free of `os.Getenv`; only `Load` touches the environment. Is
   splitting "validate the shape" from "resolve secrets" worth the extra function?
+- Auth is wrapped per route, so a route added to `main.go` by hand without it
+  would be open. Should the wiring loop be the only place routes get handlers, or
+  should the router refuse a handler that wasn't built through it?
+- Should the access log record the user ID of authenticated requests? It would be
+  safe now (StripIdentityHeaders runs before it), but Auth runs inside the router,
+  after AccessLog's slot is planted, so it needs the same holder trick as the
+  route name.
+- Next: RS256 + JWKS (`kid` lookup, cache, rotation, what to do when the JWKS
+  endpoint is down).
