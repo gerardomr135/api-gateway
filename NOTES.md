@@ -1204,9 +1204,25 @@ What broke during the "break it" experiment, and why:
   - `optional` with a garbage token: 401.
   Unit level also covers HS512 (pinned algorithm rejects it) and a non-Bearer
   scheme.
-  NOT run yet: a manual curl against a real gateway process (reads `secret_env`
-  through `config.Load`, which the test bypasses), an `alg: none` token, and a
-  token with no `exp`.
+  Also covered at unit level: an `alg: none` token (hand-built, otherwise fully
+  valid claims) and a validly signed token with no `exp`, each under `required`
+  and `optional`.
+  - `alg: none` has two defences: the pinned algorithm (`WithValidMethods`) and
+    the library itself, which refuses `none` unless the key is the special
+    `UnsafeAllowNoneSignatureType`.
+  - No `exp` has ONE defence: `WithExpirationRequired()`. Mutation check: with it
+    removed, both `no exp` rows fail. The library's default accepts a missing
+    `exp` as "never expires", so a leaked token would live forever.
+  Real processes: `scripts/m5-experiments.sh` starts toysvc x2 and the gateway
+  (temp config, secret via `secret_env`, so `config.Load` is exercised) and
+  curls it with openssl-signed tokens. 26/26 checks pass: 401 +
+  `WWW-Authenticate: Bearer` for no token / wrong key / expired / `alg: none` /
+  no `exp` / garbage / Basic; a valid token reaches the upstream as
+  `X-User-ID: alice`, roles `admin,dev`; forged `X-User-*` never reach the
+  upstream (with a valid token, with no token, and on an `auth: none` route);
+  the gateway refuses to start with the secret unset or under 32 bytes, naming
+  the variable and byte count but never printing the secret.
+  Still NOT done for M5: RS256 + JWKS.
 Self-check answers:
   1. Why is stripping inbound identity headers as important as validating the JWT?
      (DRAFT, rewrite in my own words) Upstreams trust `X-User-*` because they
