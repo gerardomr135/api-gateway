@@ -110,7 +110,11 @@ go build -o "$WORK/toysvc" ./cmd/toysvc || exit 1
 
 # Temp config: same routes, but the instances this script starts, on a spare port.
 # The orders instances are never contacted, so their docker hostnames stay.
-sed -e 's#http://users:9001#http://localhost:9001#' \
+# configs/routes.yaml uses RS256 + JWKS; this script tests the HS256 path, so the
+# auth section is rewritten to a shared secret (m5-rs256-experiments.sh does RS256).
+sed -e 's#^  algorithm: RS256.*#  algorithm: HS256\n  secret_env: GATEWAY_JWT_SECRET#' \
+    -e '/^  jwks_url:/d' -e '/^  jwks_refresh:/d' \
+    -e 's#http://users:9001#http://localhost:9001#' \
     -e 's#http://products:9003#http://localhost:9003#' \
     -e 's#listen: ":8080"#listen: ":18080"#' \
     -e 's#admin_listen: ":9090"#admin_listen: ":19090"#' \

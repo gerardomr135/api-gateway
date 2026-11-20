@@ -19,11 +19,19 @@ server:
 
 
 # (M5) How the gateway verifies Bearer tokens. Needed as soon as any route has
-# auth: required | optional. The signing secret is NOT in this file: it is read
-# from the environment variable named by secret_env (>= 32 bytes for HS256).
+# auth: required | optional.
+#   RS256 (below): the identity provider signs with a private key and publishes
+#     the public keys at jwks_url; the gateway can verify tokens but never forge
+#     them. It fetches the keys at startup (and refuses to start if that fails)
+#     and again only when a token names an unknown key id, at most once per
+#     jwks_refresh. Keep the provider's -retire-after >= its token lifetime.
+#   HS256: one shared secret, NOT in this file: it is read from the environment
+#     variable named by secret_env (>= 32 bytes). Use secret_env instead of
+#     jwks_url/jwks_refresh; setting both is a config error.
 auth:
-  algorithm: HS256          # pinned; any other "alg" in a token is rejected
-  secret_env: GATEWAY_JWT_SECRET
+  algorithm: RS256          # pinned; any other "alg" in a token is rejected
+  jwks_url: http://authsvc:9100/.well-known/jwks.json
+  jwks_refresh: 1m          # minimum gap between JWKS fetches (default 1m)
   issuer: http://auth.local
   audience: api-gateway
   leeway: 30s               # clock-skew tolerance for exp/nbf

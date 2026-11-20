@@ -15,6 +15,7 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -25,6 +26,27 @@ import (
 	"github.com/yourname/api-gateway/internal/proxy"
 	"github.com/yourname/api-gateway/internal/router"
 )
+
+// newKeySource picks where token-verification keys come from, per the pinned
+// algorithm: a shared secret for HS256, the identity provider's JWKS for RS256.
+// For RS256 it fetches the JWKS once up front, so a bad jwks_url or a dead
+// identity provider stops the gateway at startup instead of failing the first
+// user's request.
+func newKeySource(a *config.Auth, logger *slog.Logger) (middleware.KeySource, error) {
+	switch a.Algorithm {
+	case "HS256":
+		return middleware.StaticKey(a.Secret), nil
+	case "RS256":
+		jwks := middleware.NewJWKS(a.JWKSURL, a.JWKSRefresh)
+		if err := jwks.Prime(); err != nil {
+			return nil, fmt.Errorf("initial JWKS fetch: %w", err)
+		}
+		logger.Info("JWKS loaded", "refresh_min_interval", a.JWKSRefresh.String())
+		return jwks, nil
+	default: // unreachable: config.Validate only admits HS256 and RS256
+		return nil, fmt.Errorf("unsupported auth algorithm %q", a.Algorithm)
+	}
+}
 
 func main() {
 	configPath := flag.String("config", "configs/routes.yaml", "path to the route table")
@@ -66,7 +88,11 @@ func main() {
 			Issuer:    cfg.Auth.Issuer,
 			Audience:  cfg.Auth.Audience,
 			Leeway:    cfg.Auth.Leeway,
-			Keys:      middleware.StaticKey(cfg.Auth.Secret),
+		}
+		authCfg.Keys, err = newKeySource(cfg.Auth, logger)
+		if err != nil {
+			logger.Error("failed to set up token verification keys", "err", err)
+			os.Exit(1)
 		}
 	}
 

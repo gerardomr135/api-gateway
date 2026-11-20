@@ -5,9 +5,10 @@ concepts down to the code, plus how the toy identity provider `authsvc` fits in.
 
 > **Status.** HS256 verification, header stripping, the three route policies,
 > the tests and the real-process script are done and committed. `authsvc` is
-> drafted. The gateway-side JWKS key source (`internal/middleware/jwks.go`) and
-> the RS256 config are **not built yet**; section 6 describes them as the plan,
-> not as existing code.
+> drafted. The RS256 path is **written and tested but not yet committed**: the
+> JWKS key source (`internal/middleware/jwks.go`, `jwks_test.go`), the config
+> (`jwks_url`, `jwks_refresh`), the `main.go` wiring, and
+> `scripts/m5-rs256-experiments.sh`. `configs/routes.yaml` now uses RS256.
 
 **Contents**
 
@@ -16,7 +17,7 @@ concepts down to the code, plus how the toy identity provider `authsvc` fits in.
 3. [Why stripping headers matters as much as verifying](#3-why-stripping-headers-matters-as-much-as-verifying)
 4. [Code walkthrough](#4-code-walkthrough)
 5. [HS256 vs RS256, and why authsvc exists](#5-hs256-vs-rs256-and-why-authsvc-exists)
-6. [The JWKS key source (still to build)](#6-the-jwks-key-source-still-to-build)
+6. [The JWKS key source](#6-the-jwks-key-source)
 7. [The tests and the experiment script](#7-the-tests-and-the-experiment-script)
 8. [What to remember](#8-what-to-remember)
 
@@ -337,10 +338,11 @@ sequenceDiagram
 
 ---
 
-## 6. The JWKS key source (still to build)
+## 6. The JWKS key source
 
-This is the gateway-side code that is **not written yet**. It will implement
-the existing `KeySource` interface: `Key(token) (any, error)`.
+This is the gateway-side code in `internal/middleware/jwks.go`. It implements
+the existing `KeySource` interface: `Key(token) (any, error)`. The config and
+`main.go` wiring at the end of this section are still to do.
 
 ### What `Key()` has to do, in this order
 
@@ -376,15 +378,273 @@ were a secret.
 | Hostile responses | A huge or non-200 body | `io.LimitReader`, require status 200 |
 | authsvc is down | An outage there must not become an outage here | **Decision to record:** keep serving cached keys; only an unknown `kid` fails (closed) |
 
-### Config and wiring still needed
+### Why a cache that refreshes only on an unknown `kid`
 
-- `Auth` gets `jwks_url` and `jwks_refresh`.
+Two simple designs both fail:
+
+| Design | Why it fails |
+|---|---|
+| Fetch the JWKS on every request | Every request to the gateway now needs a second network call. Slow, and an authsvc outage becomes a gateway outage |
+| Fetch once at startup | Key rotation breaks everything until the gateway restarts |
+
+So the gateway **caches** the keys and refreshes **only when it meets a `kid` it
+does not know**. An unknown `kid` means one of two things: the IdP rotated, or
+someone is sending a forged token. The code cannot tell which, so it tries one
+refresh (rate-limited) and sees if the `kid` shows up.
+
+### What the code in `jwks.go` looks like
+
+Two locks with two different jobs:
+
+| Field | Type | Guards | Held for |
+|---|---|---|---|
+| `mu` | `RWMutex` | the `keys` map | nanoseconds: one map read or one pointer swap. Never across I/O |
+| `fetchMu` | `Mutex` | refreshes, and `lastFetch` | the whole refresh, including the HTTP call |
+
+A request for an already cached `kid` takes only `mu.RLock`. It never touches
+`fetchMu`, so a slow authsvc cannot slow it down. Only requests with an unknown
+`kid` queue on `fetchMu`.
+
+```mermaid
+flowchart TD
+    K["Key(token)"] --> M{"RSA method?"}
+    M -- no --> X["error"]
+    M -- yes --> KID{"kid is a<br/>non-empty string?"}
+    KID -- no --> X
+    KID -- yes --> L["lookup(kid)<br/>mu.RLock"]
+    L -- hit --> R(["return key"])
+    L -- miss --> R1["refresh(kid)<br/>take fetchMu"]
+    R1 --> RC{"lookup again:<br/>someone else just<br/>refreshed?"}
+    RC -- yes --> R
+    RC -- no --> RL{"less than minInterval<br/>since lastFetch?"}
+    RL -- yes --> E3["error: unknown kid<br/>(no fetch)"]
+    RL -- no --> ST["lastFetch = now<br/>(BEFORE the fetch)"]
+    ST --> F["fetch(): GET, status 200,<br/>1 MiB limit, parse keys"]
+    F -- error --> E4["return error<br/>cache untouched"]
+    F -- ok --> SW["mu.Lock: keys = newMap<br/>(swap, never edit in place)"]
+    SW --> FK{"kid in newMap?"}
+    FK -- yes --> R
+    FK -- no --> E3
+```
+
+Function by function:
+
+| Function | What it does |
+|---|---|
+| `NewJWKS(url, minInterval)` | Builds the struct with an **empty** (not nil) map, a 10 s HTTP timeout (a hung authsvc must not hang a goroutine forever), and `now = time.Now`. `now` is a field so tests can move the clock instead of sleeping |
+| `Key(token)` | The `KeySource` method the JWT library calls: "which key verifies this token?". Checks the method and `kid`, tries the cache, falls back to `refresh` |
+| `lookup(kid)` | `RLock`, read the map, unlock. `nil` if missing |
+| `refresh(kid)` | The slow path (see the flowchart): lock, re-check, rate-limit, stamp, fetch, swap, look in the new map |
+| `fetch()` | `GET`, require 200, decode at most 1 MiB, keep only `kty:"RSA"` keys with a `kid` and a valid `n`/`e`, **skip** bad entries, fail if zero keys remain |
+| `parseRSAKey(n, e)` | base64url-decode `n` and `e` (no padding), turn the bytes into big integers, check the exponent is sane, build an `rsa.PublicKey` |
+
+### The reasoning behind each design choice
+
+| Choice | Why |
+|---|---|
+| Method check **first**, before any key lookup | An `HS256` token must never be verified with an RSA public key used as an HMAC secret (algorithm confusion). `Auth()` also pins the algorithm with `WithValidMethods`; this is a second layer |
+| Re-check the cache after taking `fetchMu` | Turns 100 concurrent requests for the same new `kid` into **one** fetch: the other 99 wake up one at a time and find the key already cached |
+| `lastFetch` is stamped **before** the fetch | Failures must count. Otherwise a dead authsvc is hit once per request instead of once per `minInterval` |
+| Fetch with `mu` **not** held | Holding a lock across the network lets one slow response freeze every request. The first draft held `RLock` across the call, which would also have **deadlocked** when the write step was added: Go cannot upgrade a read lock to a write lock |
+| Build a whole new map and swap | Readers see the old complete map or the new complete map, never a half-built one. Nothing mutates a shared map in place |
+| Keep the old cache when a fetch fails | authsvc being down must not log out everyone who already has a cached key. Only an unknown `kid` fails (closed) |
+| Zero usable keys counts as a fetch failure | A buggy `{"keys":[]}` would otherwise wipe the cache and lock everyone out. Cost: you cannot revoke *all* keys with an empty set |
+| Status 200 and a 1 MiB read limit | A 500 HTML page would otherwise become a misleading JSON error, and a hostile endpoint could stream gigabytes into memory |
+| Skip a bad key instead of failing the document | One malformed entry should not discard the good ones |
+
+### Behaviour over time (`minInterval = 60s`)
+
+| Time | Event | What the gateway does |
+|---|---|---|
+| 0:00 | First token, `kid=A` | Cache empty: fetch, cache `{A}`, verify |
+| 0:05 | 10,000 tokens, `kid=A` | Cache hits. No network |
+| 1:00 | authsvc rotates: new key `B`, `A` retired but still published | Nothing yet: the gateway does not know |
+| 1:01 | First token with `kid=B` | Miss. More than 60 s since the last fetch: fetch, cache `{A,B}`, verify |
+| 1:01 | 100 simultaneous `kid=B` tokens | One fetch. The other 99 wait on `fetchMu` and then hit the cache |
+| 1:02 | Attacker sends `kid=junk` | Miss. Less than 60 s since the last fetch: **rejected, no fetch** |
+| 2:10 | `kid=junk` again | Interval passed: one fetch, still not there, rejected |
+| any | authsvc is down | Cached kids keep verifying. A new `kid` fails |
+
+### What each test proves (`jwks_test.go`)
+
+| Test | Proves |
+|---|---|
+| `FetchCacheAndRotation` | Cached after the first fetch; a rotated-in key is picked up, but only after `minInterval` |
+| `FloodOfRandomKids` | 50 junk kids cause 1 fetch |
+| `Stampede` | 100 concurrent callers cause 1 fetch (run with `-race`) |
+| `OutageKeepsCache` | During a 500: cached kids work, unknown kids fail |
+| `RejectsNonRSAAndMissingKid` | The algorithm-confusion and missing-`kid` guards |
+
+---
+
+### Key rotation in depth
+
+#### What it is, in one paragraph
+
+The IdP holds a private key and signs every token with it. **Rotation** means
+the IdP starts signing with a *different* private key (a new `kid`) and, after a
+grace period, stops publishing the old public key. Nothing about the tokens'
+format changes: only the key behind the signature, and the `kid` that names it.
+
+#### When does rotation happen?
+
+There is no universal answer. It is a policy decision, and `authsvc` has no
+schedule at all: it rotates only when you `POST /rotate` (or restart it).
+
+| Trigger | Example | Urgency | Old key |
+|---|---|---|---|
+| **Scheduled hygiene** | Every few weeks or months, by company policy | Low | Keep through a grace period |
+| **Suspected compromise** | The private key leaked, a server was breached, someone with access left | **Immediate** | Remove at once (`drop_old`) |
+| **Cryptographic upgrade** | Moving from 2048 to 3072-bit keys, or to a different algorithm | Planned | Keep through a grace period |
+| **Infrastructure change** | Moving to new hardware, or an IdP whose keys live in memory restarts | Varies | Often lost by accident |
+
+Why rotate on a schedule if nothing is wrong? It **limits the damage window**
+of a key that was stolen without anyone noticing, and it keeps the procedure
+practised: a rotation you do monthly is routine, one you do for the first time
+during a breach is not.
+
+#### How it works: the life of one key
+
+Careful IdPs move a key through four phases:
+
+```mermaid
+flowchart LR
+    P["1. Published<br/>public key is in the JWKS,<br/>not signing yet"] --> A["2. Active<br/>signing every new token"]
+    A --> R["3. Retired<br/>no longer signing,<br/>still published"]
+    R --> G["4. Removed<br/>gone from the JWKS"]
+```
+
+- **1 → 2 (pre-publish)** gives every gateway time to cache the new key *before*
+  the first token that uses it exists.
+- **3 (retired)** exists because tokens are valid for a while after they are
+  signed. A token signed one second before the switch is still good for its full
+  lifetime.
+- **4** happens only when no valid token signed by that key can still exist.
+
+`authsvc` simplifies this: `POST /rotate` does phases 1 and 2 **in one step**
+(the new key is published and signing immediately), then keeps the old key in
+phase 3 for `-retire-after`, then drops it. It is simpler, and it is exactly why
+the gateway must be able to discover a new `kid` on demand.
+
+I ran this against the real `authsvc` with `-retire-after 4s`:
+
+```
+start:   kid cb2a...                    (one key)
+rotate:  new kid 0d22...
+after:   0d22... cb2a...                (new + retired, both published)
++5s:     0d22...                        (retired key dropped)
+drop:    POST /rotate?drop_old=true -> only the newest kid is left
+```
+
+#### The rule for the grace period
+
+> The retired key must stay published for **at least the longest lifetime of
+> any token it signed** (plus a margin for caches and clock differences).
+
+Check this against your own defaults: `authsvc` has `-ttl 15m` but
+`-retire-after 10m`. A token minted one second before a rotation is valid
+(`exp`) for 15 minutes, but its key leaves the JWKS after 10. Once the gateway
+refreshes after that point, the token is rejected with about 5 minutes of life
+left. For lab runs, either use `-retire-after 20m` or a shorter `-ttl`.
+
+#### What rotation does to the gateway
+
+**The normal case.** The gateway is not told about a rotation. It finds out
+when a token with a new `kid` arrives:
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant A as authsvc
+    participant G as Gateway
+    Note over G: cache = {A}
+    A->>A: POST /rotate (new key B)
+    C->>A: POST /token
+    A-->>C: token (kid=B)
+    C->>G: request with kid=B
+    Note over G: miss -> refresh (rate-limited)
+    G->>A: GET /.well-known/jwks.json
+    A-->>G: keys {B, A}
+    Note over G: cache = {B, A}, verify with B
+    G-->>C: 200
+    Note over G: tokens signed with A still verify until A is removed<br/>and the gateway next refreshes
+```
+
+Everything else follows from that one mechanism. These are the behaviours to
+know, including the two edge cases that can bite:
+
+| Situation | What the gateway does | What the client sees |
+|---|---|---|
+| Rotation, new `kid` appears, interval has passed | One fetch, then verifies | The first request is slightly slower (one fetch); then normal |
+| 100 requests with the new `kid` at once | One fetch; the rest wait, then hit the cache | All succeed |
+| **Rotation soon after the last fetch** (inside `minInterval`) | Refuses to fetch: unknown `kid` | **A valid token gets 401** until the interval passes |
+| Retired key removed from the JWKS | The old key stays cached until the *next* refresh, then disappears | Tokens signed with it start failing 401, which is correct |
+| `drop_old` / emergency rotation | **Does not notice** until an unknown `kid` arrives (see below) | Old tokens keep working for a while |
+| authsvc is down during a rotation | Keeps the cache; the new `kid` cannot be fetched | New-key tokens get 401; old-key tokens keep working |
+| authsvc **restarts** | Its keys are in memory, so this is a `drop_old` rotation | Every outstanding token fails after the next gateway refresh; users must get a new one |
+| Gateway restarts | Cache is empty; the first request fetches | Nothing visible (the planned startup fetch will surface a bad URL immediately) |
+
+**Edge case 1: valid tokens rejected right after a rotation.**
+`minInterval` protects authsvc from a flood of junk `kid`s, but it cannot tell a
+junk `kid` from a real new one. Example: the gateway fetches at 0:00, authsvc
+rotates at 0:05, and a user logs in at 0:10 and gets a `kid=B` token. With
+`minInterval = 60s` the gateway answers 401 until 1:00 even though the token is
+perfectly valid. This is the price of the flood protection. Ways to soften it:
+a shorter interval (`jwks_refresh`), pre-publishing the new key before it signs,
+and clients that retry once on 401. It is worth logging this case as "unknown
+kid, refresh suppressed" so it is not mistaken for a bad token.
+
+**Edge case 2: a removed or compromised key is trusted too long.**
+The cache has no expiry. The gateway only looks at the JWKS again when it sees
+an unknown `kid`. After an emergency `drop_old` rotation, the gateway keeps
+accepting tokens signed by the compromised key **until some request with a new
+`kid` triggers a refresh**. In practice that happens as soon as any legitimate
+user gets a post-rotation token and calls the gateway, but it is not
+guaranteed. If that window is unacceptable, the fix is a maximum cache age or a
+background refresh. This is a design decision to record in the notes: the
+current plan is "refresh only on unknown `kid`", which favours simplicity and a
+quiet IdP over fast revocation.
+
+`authsvc` also sends `Cache-Control: public, max-age=60` on the JWKS. The
+gateway ignores it: it decides its own refresh policy.
+
+#### Try it yourself
+
+The JWKS side needs only `authsvc` and `curl` (the gateway's RS256 config is
+not wired up yet):
+
+```bash
+go run ./cmd/authsvc -retire-after 30s &
+curl -s localhost:9100/.well-known/jwks.json          # one key
+curl -s -X POST 'localhost:9100/token?sub=alice'      # note the kid
+curl -s -X POST localhost:9100/rotate                 # new current key
+curl -s localhost:9100/.well-known/jwks.json          # two keys: new + retired
+sleep 35
+curl -s localhost:9100/.well-known/jwks.json          # the retired key is gone
+```
+
+The gateway side is covered by the unit tests, which move the clock with `j.now`
+instead of waiting: run `go test -race -run JWKS -v ./internal/middleware/`.
+
+---
+
+### Config and wiring
+
+Done, and checked with real processes (`scripts/m5-rs256-experiments.sh`).
+
+- `Auth` has `jwks_url` and `jwks_refresh`. `jwks_refresh` is the `minInterval`
+  of the key source; it defaults to `1m` when RS256 leaves it out.
 - `Validate`: `algorithm` must be `HS256` or `RS256`; `RS256` requires an
-  `http(s)` `jwks_url`; `HS256` rejects `jwks_url` (a config with both is almost
-  certainly a mistake).
-- `secret_env` is only required for HS256 (`resolveSecrets` already skips others).
-- `main.go` replaces the hard-coded `middleware.StaticKey(...)` with a switch on
-  the algorithm. If the first JWKS fetch fails, the gateway refuses to start.
+  absolute `http(s)` `jwks_url` and a non-negative `jwks_refresh`; `HS256`
+  rejects `jwks_url` and `jwks_refresh` (a config with both is almost certainly a
+  mistake). The error never echoes the URL, which could carry credentials.
+- `secret_env` is only required for HS256 (`resolveSecrets` skips other
+  algorithms).
+- `main.go` has `newKeySource`, a switch on the algorithm: `StaticKey` for HS256,
+  `NewJWKS` for RS256. For RS256 it calls `Prime()` once at startup and the
+  gateway **refuses to start** if that fails (`initial JWKS fetch: ...`).
+  `Prime()` shares `fetchAndStore` with the refresh path, so both stamp
+  `lastFetch` and swap the cache the same way.
 
 ---
 

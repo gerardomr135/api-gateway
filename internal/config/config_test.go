@@ -453,6 +453,14 @@ func authCfg(policy string) Config {
 	}
 }
 
+// rs256 turns the HS256 auth section from authCfg into a valid RS256 one.
+func rs256(c *Config) {
+	c.Auth.Algorithm = "RS256"
+	c.Auth.SecretEnv = ""
+	c.Auth.JWKSURL = "http://auth:9100/.well-known/jwks.json"
+	c.Auth.JWKSRefresh = time.Minute
+}
+
 func TestValidateAuth(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -468,7 +476,16 @@ func TestValidateAuth(t *testing.T) {
 		{"typo in route policy", func(c *Config) { c.Routes[0].Auth = "requird" }, []string{`route "users"`, `"requird"`, "want required, optional or none"}},
 		{"empty route policy", func(c *Config) { c.Routes[0].Auth = "" }, []string{"invalid auth"}},
 		{"auth route without auth section", func(c *Config) { c.Auth = nil }, []string{`"users"`, `top-level "auth" section is missing`}},
-		{"unsupported algorithm", func(c *Config) { c.Auth.Algorithm = "RS256" }, []string{"auth.algorithm", `"RS256"`, "want HS256"}},
+		{"unsupported algorithm", func(c *Config) { c.Auth.Algorithm = "ES256" }, []string{"auth.algorithm", `"ES256"`, "want HS256 or RS256"}},
+		{"valid RS256", rs256, nil},
+		{"RS256 does not need secret_env", func(c *Config) { rs256(c); c.Auth.SecretEnv = "" }, nil},
+		{"RS256 missing jwks_url", func(c *Config) { rs256(c); c.Auth.JWKSURL = "" }, []string{"auth.jwks_url is required for RS256"}},
+		{"RS256 jwks_url not http", func(c *Config) { rs256(c); c.Auth.JWKSURL = "ftp://auth/jwks" }, []string{"auth.jwks_url must be an absolute http(s) URL"}},
+		{"RS256 jwks_url without host", func(c *Config) { rs256(c); c.Auth.JWKSURL = "http:///jwks" }, []string{"auth.jwks_url must be an absolute http(s) URL"}},
+		{"RS256 jwks_url relative", func(c *Config) { rs256(c); c.Auth.JWKSURL = "/.well-known/jwks.json" }, []string{"auth.jwks_url must be an absolute http(s) URL"}},
+		{"RS256 negative jwks_refresh", func(c *Config) { rs256(c); c.Auth.JWKSRefresh = -time.Second }, []string{"auth.jwks_refresh", "-1s"}},
+		{"HS256 with jwks_url", func(c *Config) { c.Auth.JWKSURL = "http://auth:9100/jwks" }, []string{"only apply to RS256"}},
+		{"HS256 with jwks_refresh", func(c *Config) { c.Auth.JWKSRefresh = time.Minute }, []string{"only apply to RS256"}},
 		{"alg none", func(c *Config) { c.Auth.Algorithm = "none" }, []string{"auth.algorithm", `"none"`}},
 		{"empty algorithm", func(c *Config) { c.Auth.Algorithm = "" }, []string{"auth.algorithm"}},
 		{"missing secret_env", func(c *Config) { c.Auth.SecretEnv = "" }, []string{"auth.secret_env"}},
@@ -565,6 +582,49 @@ routes:
 		_, err := Load(writeConfig(t, strings.Replace(yamlText, "audience: api-gateway", "audience: api-gateway\n  Secret: aaaa", 1)))
 		if err == nil {
 			t.Fatal("Load() accepted a secret written in the YAML file")
+		}
+	})
+}
+
+func TestLoadRS256(t *testing.T) {
+	const yamlText = `
+auth:
+  algorithm: RS256
+  jwks_url: http://auth:9100/.well-known/jwks.json
+  issuer: http://auth.local
+  audience: api-gateway
+upstreams:
+  users:
+    instances: ["http://localhost:9001"]
+routes:
+  - name: users
+    prefix: /api/users
+    upstream: users
+    methods: [GET]
+`
+
+	t.Run("loads without any secret in the environment and defaults the refresh", func(t *testing.T) {
+		t.Setenv("TEST_SECRET", "") // RS256 must not look for a shared secret
+
+		cfg, err := Load(writeConfig(t, yamlText))
+		if err != nil {
+			t.Fatalf("Load() error = %v", err)
+		}
+		if cfg.Auth.Secret != nil {
+			t.Errorf("Auth.Secret = %q, want nil for RS256", cfg.Auth.Secret)
+		}
+		if cfg.Auth.JWKSRefresh != defaultJWKSRefresh {
+			t.Errorf("JWKSRefresh = %s, want default %s", cfg.Auth.JWKSRefresh, defaultJWKSRefresh)
+		}
+	})
+
+	t.Run("an explicit jwks_refresh is kept", func(t *testing.T) {
+		cfg, err := Load(writeConfig(t, strings.Replace(yamlText, "  audience: api-gateway\n", "  audience: api-gateway\n  jwks_refresh: 15s\n", 1)))
+		if err != nil {
+			t.Fatalf("Load() error = %v", err)
+		}
+		if cfg.Auth.JWKSRefresh != 15*time.Second {
+			t.Errorf("JWKSRefresh = %s, want 15s", cfg.Auth.JWKSRefresh)
 		}
 	})
 }

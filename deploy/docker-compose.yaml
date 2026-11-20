@@ -37,6 +37,28 @@ services:
     command: ["-name=products", "-port=9003"]
     ports: ["9003:9003"]
 
+  # (M5) Toy identity provider: mints RS256 tokens (POST /token?sub=alice) and
+  # publishes its public keys at /.well-known/jwks.json, which the gateway
+  # fetches (auth.jwks_url in routes.yaml). -retire-after must be >= the token
+  # lifetime (-ttl, default 15m), or tokens minted just before a rotation lose
+  # their key before they expire. Rotate with: curl -X POST localhost:9100/rotate
+  authsvc:
+    <<: *toysvc
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      args:
+        TARGET: authsvc
+    command: ["-port=9100", "-retire-after=20m"]
+    ports: ["9100:9100"]
+    # The gateway fetches the JWKS at startup and refuses to start without it,
+    # so it waits for this to be healthy (busybox wget ships with alpine).
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:9100/.well-known/jwks.json"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
   gateway:
     build:
       context: ..
@@ -44,10 +66,16 @@ services:
       args:
         TARGET: gateway
     command: ["-config=/configs/routes.yaml"]
-    environment:
-      GATEWAY_JWT_SECRET: ${GATEWAY_JWT_SECRET:?set GATEWAY_JWT_SECRET (>= 32 bytes)}
+    # No signing secret here: routes.yaml uses RS256, so the gateway only holds
+    # public keys. (For HS256, set auth.secret_env and pass that variable.)
     volumes: ["../configs:/configs:ro"]
     ports: ["8080:8080", "9090:9090"]
-    depends_on: [users, orders-1, orders-2, orders-3, products]
+    depends_on:
+      users: {condition: service_started}
+      orders-1: {condition: service_started}
+      orders-2: {condition: service_started}
+      orders-3: {condition: service_started}
+      products: {condition: service_started}
+      authsvc: {condition: service_healthy}
 
   # (M10) Observability stack: add jaeger, prometheus and grafana here.

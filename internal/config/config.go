@@ -38,10 +38,15 @@ type Config struct {
 
 type Auth struct {
 	Algorithm string        `yaml:"algorithm"`
-	SecretEnv string        `yaml:"secret_env"`
+	SecretEnv string        `yaml:"secret_env"` // HS256 only
 	Issuer    string        `yaml:"issuer"`
 	Audience  string        `yaml:"audience"`
 	Leeway    time.Duration `yaml:"leeway"`
+
+	// RS256 only: where the identity provider publishes its public keys, and
+	// the minimum time between two fetches of them (see middleware.JWKS).
+	JWKSURL     string        `yaml:"jwks_url"`
+	JWKSRefresh time.Duration `yaml:"jwks_refresh"`
 
 	Secret []byte `yaml:"-"` // resolved from SecretEnv in Load, never from the file
 }
@@ -146,6 +151,12 @@ func Load(path string) (*Config, error) {
 	return cfg, nil
 }
 
+// defaultJWKSRefresh is the minimum gap between two JWKS fetches when
+// auth.jwks_refresh is not set. It bounds how often unknown "kid"s can make the
+// gateway call the identity provider, and how long a valid token signed by a
+// just-rotated key may be refused (see docs/M5-auth-explained.md, section 6).
+const defaultJWKSRefresh = time.Minute
+
 // minHS256SecretBytes is the RFC 7518 §3.2 floor: an HS256 key must be at
 // least as long as the hash output (256 bits).
 const minHS256SecretBytes = 32
@@ -198,6 +209,10 @@ func applyDefaults(cfg *Config) {
 	}
 	if cfg.Server.MaxHeaderBytes == 0 {
 		cfg.Server.MaxHeaderBytes = 1 << 20 // 1MB
+	}
+
+	if a := cfg.Auth; a != nil && a.Algorithm == "RS256" && a.JWKSRefresh == 0 {
+		a.JWKSRefresh = defaultJWKSRefresh
 	}
 
 	for i := range cfg.Routes {
@@ -323,15 +338,25 @@ func (c *Config) Validate() error {
 	}
 
 	if a := c.Auth; a != nil {
-		// RS256 joins this list when the JWKS key source exists (M5 step 6);
-		// accepting it earlier would validate a config that cannot work.
 		switch a.Algorithm {
 		case "HS256":
 			if a.SecretEnv == "" {
 				errs = append(errs, errors.New("auth.secret_env is required for HS256: name the environment variable that holds the signing secret"))
 			}
+			// Both settings together are almost certainly a mistake: the
+			// gateway would silently ignore the JWKS and use the shared secret.
+			if a.JWKSURL != "" || a.JWKSRefresh != 0 {
+				errs = append(errs, errors.New("auth.jwks_url and auth.jwks_refresh only apply to RS256: remove them, or switch auth.algorithm to RS256"))
+			}
+		case "RS256":
+			if err := validateJWKSURL(a.JWKSURL); err != nil {
+				errs = append(errs, err)
+			}
+			if a.JWKSRefresh < 0 {
+				errs = append(errs, fmt.Errorf("auth.jwks_refresh is %s: must not be negative", a.JWKSRefresh))
+			}
 		default:
-			errs = append(errs, fmt.Errorf("auth.algorithm %q is not supported: want HS256", a.Algorithm))
+			errs = append(errs, fmt.Errorf("auth.algorithm %q is not supported: want HS256 or RS256", a.Algorithm))
 		}
 		if a.Issuer == "" {
 			errs = append(errs, errors.New("auth.issuer is required: without it the \"iss\" claim cannot be checked and tokens from any issuer would be accepted"))
@@ -348,6 +373,18 @@ func (c *Config) Validate() error {
 		return errors.Join(errs...)
 	}
 
+	return nil
+}
+
+// validateJWKSURL checks that auth.jwks_url is an absolute http(s) URL.
+func validateJWKSURL(raw string) error {
+	if raw == "" {
+		return errors.New("auth.jwks_url is required for RS256: the URL where the identity provider publishes its public keys")
+	}
+	u, err := url.Parse(raw)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return errors.New("auth.jwks_url must be an absolute http(s) URL such as http://auth:9100/.well-known/jwks.json")
+	}
 	return nil
 }
 
