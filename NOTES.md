@@ -1026,9 +1026,14 @@ body, looks identical from here, so I did not guess.
 
 ## M5 — Authentication at the edge   (in progress, started 2026-10-26)
 
-Progress: steps 1 (config), 2 (header stripping) and 3 (HS256 verification, 401s,
-identity headers, per-route policy) done, with unit and end-to-end tests. Still to
-do: RS256 + JWKS, a manual curl against a running gateway.
+Progress: steps 1 (config), 2 (header stripping), 3 (HS256 verification, 401s,
+identity headers, per-route policy), 4 (authsvc, a toy identity provider) and 5/6
+(RS256 verified against a JWKS, with config, wiring, key rotation and the lab run)
+done, with unit, end-to-end and real-process tests. The gateway also no longer
+forwards the `Authorization` header once a token is verified. Still open: see the
+questions at the end of this section.
+
+Longer explanation of all of this, with diagrams: `docs/M5-auth-explained.md`.
 
 What I built so far (step 1, config):
 - A new top-level `auth:` section (`config.Auth`, a pointer on `Config` so "absent"
@@ -1049,7 +1054,7 @@ What I built so far (step 1, config):
   `required`/`optional` need the top-level `auth` section (one error listing all
   such routes); `algorithm` is on an allowlist (only `HS256` for now, RS256 joins
   at the JWKS step, because accepting it earlier would validate a config that
-  can't work); `issuer`, `audience` and `secret_env` are non-empty; `leeway >= 0`.
+  can't work; RS256 joined in step 6, see below); `issuer`, `audience` and `secret_env` are non-empty; `leeway >= 0`.
   All problems are reported at once (`errors.Join`, as in M2).
 - Config errors follow one shape: YAML path first (`auth.issuer`), what is wrong,
   what is expected, and why it matters when that isn't obvious, with the bad value
@@ -1222,7 +1227,124 @@ What broke during the "break it" experiment, and why:
   upstream (with a valid token, with no token, and on an `auth: none` route);
   the gateway refuses to start with the secret unset or under 32 bytes, naming
   the variable and byte count but never printing the secret.
-  Still NOT done for M5: RS256 + JWKS.
+  The RS256 + JWKS part is in steps 4 to 6 below.
+
+What I built (step 4, authsvc):
+- `cmd/authsvc` is a test fixture, like `toysvc`: a toy identity provider so the
+  RS256 path has something real to talk to. It is insecure on purpose (a token to
+  anyone who asks) and keeps its keys in memory.
+  - `POST /token?sub=alice&roles=admin,dev&ttl=10m`: RS256 token signed with the
+    CURRENT key, `kid` in the header. A negative `ttl` mints an expired token.
+  - `GET /.well-known/jwks.json`: current key plus retired keys still inside
+    `-retire-after`. Each JWK is `{kty, use, alg, kid, n, e}`, `n` and `e`
+    big-endian bytes in base64url WITHOUT padding.
+  - `POST /rotate`: new current key, old one stays published for
+    `-retire-after`. `?drop_old=true` removes retired keys at once.
+  - A restart is the same as a `drop_old` rotation (keys are in memory).
+- I checked one of its tokens independently with `openssl`, rebuilding the public
+  key from `n` and `e`: `Verified OK`.
+
+What I built (step 5/6, RS256 + JWKS in the gateway):
+- `middleware.JWKS` (`internal/middleware/jwks.go`) implements `KeySource`.
+  `Key()` checks, in this order: the method is RSA (an HS256 token never reaches
+  a key lookup), `kid` is a non-empty string, `kid` is in the cache (read lock),
+  else one refresh.
+- Two locks with two jobs. `mu` (RWMutex) guards the `keys` map and is held for
+  nanoseconds: a map read or a pointer swap, never across I/O. `fetchMu` (Mutex)
+  serialises refreshes and guards `lastFetch`. A cached `kid` never touches
+  `fetchMu`, so a slow authsvc cannot slow down requests that already have
+  their key.
+- `refresh`: take `fetchMu`, look in the cache AGAIN (100 concurrent requests with
+  the same new `kid` cause one fetch), check the rate limit, stamp `lastFetch`,
+  fetch, swap the whole map, look in the new map.
+- Decisions (each has a test):
+  - `lastFetch` is stamped BEFORE the fetch, so failures count. A flood of random
+    `kid`s, or a dead authsvc, causes at most one attempt per `jwks_refresh`.
+  - On a failed fetch the old cache is kept: an authsvc outage must not log out
+    users whose key we already have. Only an unknown `kid` fails (closed).
+  - A fully built new map is swapped in; nothing mutates the shared map, so readers
+    never see a half-built cache (and no nil-map writes).
+  - No lock is held during the HTTP call. Holding `RLock` across it would also have
+    deadlocked once the write step existed: Go cannot upgrade a read lock.
+  - Response must be 200 and is read through a 1 MiB `LimitReader`; a bad entry is
+    skipped instead of failing the document.
+  - Zero usable keys counts as a failed fetch, not an empty cache. Otherwise an
+    authsvc bug returning `{"keys":[]}` would lock everyone out. Cost: no way to
+    revoke ALL keys with an empty set. Accepted.
+- Config: `auth.jwks_url` and `auth.jwks_refresh` (default `1m`, the
+  `minInterval`). `Validate`: algorithm is HS256 or RS256; RS256 needs an absolute
+  http(s) `jwks_url` and `jwks_refresh >= 0`; HS256 rejects both (a config with
+  both is almost certainly a mistake); `secret_env` stays HS256-only. The URL is
+  not echoed in the error, it could carry credentials.
+- `main.go`: `newKeySource` switches on the algorithm. For RS256 it calls
+  `Prime()` (one fetch) at startup and the gateway REFUSES TO START if that
+  fails (`initial JWKS fetch: ...`), so a wrong URL shows up at boot instead of as
+  the first user's 401. `Prime` and the refresh path share `fetchAndStore`.
+- The gateway no longer forwards `Authorization`. After a token verifies, `Auth`
+  deletes the header: upstreams learn the caller from `X-User-*`, so a
+  compromised or logging upstream cannot leak or replay the token. Only after
+  verification (a rejected request never reaches the upstream). `auth: none`
+  routes still forward whatever the client sent, because the gateway does not look
+  at credentials there.
+- Compose: an `authsvc` service (`-retire-after=20m`, healthcheck on the JWKS URL);
+  the gateway waits for it to be healthy; `GATEWAY_JWT_SECRET` is no longer
+  required. `configs/routes.yaml` now uses RS256.
+
+Bugs and mistakes, found on review or in testing:
+- First draft of `jwks.go`, found on review:
+  - it never stored what it fetched and never updated `lastFetch`, so the rate
+    limit never engaged;
+  - the payload only read `kid`, so no key could ever be built from `n` and `e`;
+  - `RLock` held across the network call (stalls, and a deadlock waiting to happen);
+  - `return nil, nil` for an unknown `kid` instead of an error;
+  - the last loop looked in the OLD map instead of the fetched one;
+  - no status check or size limit; `keys` nil until the first write.
+- While switching the config I changed the guard in `resolveSecrets` from
+  `!= "HS256"` to `!= "RS256"` (and the yaml of `TestLoadResolvesSecret`). That
+  guard is "skip unless HS256": the edit would have skipped loading the HS256
+  secret and demanded one for RS256. Reverted. Lesson: a find-and-replace of the
+  algorithm name is not the same as switching the algorithm.
+- The `m5-experiments.sh` script copies `configs/routes.yaml`, so switching the
+  file to RS256 would have broken it. It now rewrites the auth block to HS256 in
+  its temp config.
+- `authsvc` defaults are inconsistent: `-ttl 15m` but `-retire-after 10m`. A token
+  minted just before a rotation lives 15 minutes but loses its key after 10.
+  Rule: the retired key must stay published at least as long as the longest token
+  it signed (plus a margin). The compose file uses 20m.
+
+Tests and measurements:
+- `jwks_test.go`: cache + rotation, flood of random `kid`s (50 -> 1 fetch),
+  stampede (100 concurrent -> 1 fetch, under `-race`), outage keeps the cache,
+  HS256 / missing `kid` rejected, `Prime` (loads at startup, reports an
+  unreachable or broken provider). The clock is injected (`j.now`), so interval
+  tests do not sleep.
+- Config tests for every RS256 / HS256 combination, and `Authorization` stripping
+  (unit test for `required` and `optional`; the end-to-end test asserts every
+  request that reached the upstream had no `Authorization`). Mutation check:
+  removing the `Del` makes the unit test fail.
+- `scripts/m5-rs256-experiments.sh` (real authsvc + toysvc + gateway, 17/17):
+  valid token 200 with `X-User-ID: alice`; HS256 token 401; rotation; `drop_old`;
+  authsvc down (cached key still verifies); gateway refuses to start when the
+  JWKS is unreachable. `m5-experiments.sh` still passes (26/26).
+- Docker lab (`make lab-up`), through the gateway on :8080:
+  - no token: 401; valid token: 200; the upstream's echo shows `X-User-Id: alice`
+    and roles, and (after the strip) no `Authorization` header;
+  - `POST /rotate`, then a new-key token AT ONCE: 401, because the last fetch was
+    inside the 1m window (valid token refused, see "Rotation behaviour" below);
+  - same token after 62 s: 200; the old token still 200 (retired key published).
+
+Rotation behaviour I want to remember (details in the explainer, section 6):
+- The gateway is never told about a rotation. It finds out when a token with an
+  unknown `kid` arrives, and refreshes at most once per `jwks_refresh`.
+- Edge case 1: a valid token with a new `kid` is refused until the interval
+  passes. This is the price of the flood protection (the code cannot tell a junk
+  `kid` from a real new one). Softer: a shorter `jwks_refresh`, publishing the new
+  key BEFORE it signs, clients that retry once on 401.
+- Edge case 2: the cache has no expiry. After an emergency `drop_old` rotation the
+  gateway keeps trusting the removed key until some token with a new `kid` forces
+  a refresh. In practice that happens as soon as one legitimate user uses a new
+  token, but it is not guaranteed. Fix if needed: max cache age or a background
+  refresh.
 Self-check answers:
   1. Why is stripping inbound identity headers as important as validating the JWT?
      (DRAFT, rewrite in my own words) Upstreams trust `X-User-*` because they
@@ -1237,6 +1359,12 @@ Self-check answers:
      `alg: none` skips the signature, and switching RS256 to HS256 makes the
      verifier use the public key as an HMAC secret. Config decides, the token
      only has to match.
+  3. Why a cache that refreshes only on an unknown `kid`, with a minimum interval?
+     (DRAFT) Fetching the JWKS per request makes the identity provider a hard
+     dependency of every request; fetching once at startup breaks on rotation.
+     An unknown `kid` is the signal that the provider rotated, but it is also what
+     an attacker sends, so refreshes are rate-limited, and failures count against
+     the limit. The old keys stay cached if the fetch fails.
 Interview one-liner:
   (DRAFT) "The gateway is the only trusted writer of identity headers: it strips
   whatever the client sends, verifies the JWT with a pinned algorithm plus
@@ -1256,5 +1384,17 @@ Open questions to bring to review:
   safe now (StripIdentityHeaders runs before it), but Auth runs inside the router,
   after AccessLog's slot is planted, so it needs the same holder trick as the
   route name.
-- Next: RS256 + JWKS (`kid` lookup, cache, rotation, what to do when the JWKS
-  endpoint is down).
+- JWKS cache has no expiry (edge case 2 above). Is "refresh only on an unknown
+  `kid`" enough, or should there be a max cache age / background refresh so a
+  revoked key stops being trusted within a known time? It trades simplicity and a
+  quiet identity provider against speed of revocation.
+- Edge case 1 (valid new-`kid` token refused for up to `jwks_refresh`): is a 1m
+  default right, or should the gateway log "unknown kid, refresh suppressed" and
+  the lab use a shorter value? Should the key be pre-published before it signs?
+- Should `auth: none` routes also drop `Authorization`? Today they forward what
+  the client sent; stripping it in `StripIdentityHeaders` would change that
+  middleware's contract and tests.
+- The RS256 path is covered end to end only by scripts and the lab, not by a Go
+  test. Worth a Go e2e test with an in-process fake JWKS and a real rotation?
+- authsvc keeps its keys in memory, so a restart is a `drop_old` rotation. Fine
+  for a toy; a real provider must persist its keys.
