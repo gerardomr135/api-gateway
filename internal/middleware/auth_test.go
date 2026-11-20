@@ -58,6 +58,31 @@ func mkNoExpToken(t *testing.T, key string) string {
 	return s
 }
 
+// TestAuthDoesNotForwardTheCredential checks what the upstream receives: the
+// identity headers, but never the bearer token itself.
+func TestAuthDoesNotForwardTheCredential(t *testing.T) {
+	good := mkToken(t, "secret", time.Now().Add(time.Hour), jwt.SigningMethodHS256)
+	for _, policy := range []string{"required", "optional"} {
+		t.Run(policy, func(t *testing.T) {
+			var gotAuth, gotID string
+			h := Auth(testDeps, policy)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotAuth = r.Header.Get("Authorization")
+				gotID = r.Header.Get(HeaderUserID)
+			}))
+			req := httptest.NewRequest("GET", "/", nil)
+			req.Header.Set("Authorization", "Bearer "+good)
+			h.ServeHTTP(httptest.NewRecorder(), req)
+
+			if gotID != "u1" {
+				t.Fatalf("X-User-ID = %q, want u1 (the request was not verified)", gotID)
+			}
+			if gotAuth != "" {
+				t.Errorf("upstream received Authorization %q, want it stripped", gotAuth)
+			}
+		})
+	}
+}
+
 func TestAuth(t *testing.T) {
 	good := mkToken(t, "secret", time.Now().Add(time.Hour), jwt.SigningMethodHS256)
 	tests := []struct {

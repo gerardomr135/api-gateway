@@ -103,6 +103,13 @@ func Auth(a AuthDependencies, policy string) Middleware {
 			r.Header.Set(HeaderUserID, subject)
 			r.Header.Set(HeaderUserRoles, strings.Join(claims.Roles, ","))
 
+			// The token has done its job: upstreams are told who the caller is
+			// through X-User-*, so they never need the credential itself. Not
+			// forwarding it means a compromised or logging upstream cannot leak
+			// or replay it. Only after verification: a rejected request never
+			// reaches the upstream at all.
+			r.Header.Del("Authorization")
+
 			next.ServeHTTP(w, r)
 		})
 	}

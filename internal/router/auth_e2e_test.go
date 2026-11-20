@@ -30,6 +30,7 @@ func TestGatewayAuthEndToEnd(t *testing.T) {
 		// Echo the identity headers the upstream saw.
 		w.Header().Set("X-Seen-User-ID", r.Header.Get("X-User-ID"))
 		w.Header().Set("X-Seen-User-Roles", r.Header.Get("X-User-Roles"))
+		w.Header().Set("X-Seen-Authorization", r.Header.Get("Authorization"))
 		io.WriteString(w, "ok")
 	}))
 	t.Cleanup(upstream.Close)
@@ -128,6 +129,10 @@ func TestGatewayAuthEndToEnd(t *testing.T) {
 			}
 			if got := resp.Header.Get("X-Seen-User-Roles"); got != tt.wantRole {
 				t.Errorf("upstream saw X-User-Roles %q, want %q", got, tt.wantRole)
+			}
+			// A verified token is consumed by the gateway, not forwarded.
+			if got := resp.Header.Get("X-Seen-Authorization"); tt.wantHit && got != "" {
+				t.Errorf("upstream saw Authorization %q, want it stripped", got)
 			}
 			if tt.wantStatus == 401 {
 				if !strings.HasPrefix(resp.Header.Get("WWW-Authenticate"), "Bearer") {
